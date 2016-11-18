@@ -19,18 +19,20 @@ import {
   addParamsToUrl,
   assertAbsoluteHttpOrHttpsUrl,
   assertHttpsUrl,
-  getOrigin,
   getSourceOrigin,
   getSourceUrl,
   isProxyOrigin,
+  isSecureUrl,
   parseQueryString,
   parseUrl,
   removeFragment,
   resolveRelativeUrl,
   resolveRelativeUrlFallback_,
+  serializeQueryString,
+  getCorsUrl,
 } from '../../src/url';
 
-describe('url', () => {
+describe('parseUrl', () => {
 
   const currentPort = location.port;
 
@@ -73,6 +75,32 @@ describe('url', () => {
       search: '?123',
       hash: '#foo',
       origin: 'https://foo.com:123',
+    });
+  });
+  it('should omit HTTP default port', () => {
+    compareParse('http://foo.com:80/abc?123#foo', {
+      href: 'http://foo.com/abc?123#foo',
+      protocol: 'http:',
+      host: 'foo.com',
+      hostname: 'foo.com',
+      port: '',
+      pathname: '/abc',
+      search: '?123',
+      hash: '#foo',
+      origin: 'http://foo.com',
+    });
+  });
+  it('should omit HTTPS default port', () => {
+    compareParse('https://foo.com:443/abc?123#foo', {
+      href: 'https://foo.com/abc?123#foo',
+      protocol: 'https:',
+      host: 'foo.com',
+      hostname: 'foo.com',
+      port: '',
+      pathname: '/abc',
+      search: '?123',
+      hash: '#foo',
+      origin: 'https://foo.com',
     });
   });
   it('should support http', () => {
@@ -127,7 +155,15 @@ describe('url', () => {
       origin: 'http://foo.com:123',
     });
   });
+  it('should parse origin https://twitter.com/path#abc', () => {
+    expect(parseUrl('https://twitter.com/path#abc').origin)
+        .to.equal('https://twitter.com');
+  });
 
+  it('should parse origin data:12345', () => {
+    expect(parseUrl('data:12345').origin)
+        .to.equal('data:12345');
+  });
 });
 
 
@@ -183,7 +219,35 @@ describe('parseQueryString', () => {
   });
 });
 
-describe('assertHttpsUrl', () => {
+
+describe('serializeQueryString', () => {
+  it('should return empty string for empty params', () => {
+    expect(serializeQueryString({})).to.equal('');
+    expect(serializeQueryString({
+      nullValue: null,
+      undefValue: undefined,
+    })).to.equal('');
+  });
+  it('should serialize a single value', () => {
+    expect(serializeQueryString({a: 'A'})).to.equal('a=A');
+  });
+  it('should serialize multiple values', () => {
+    expect(serializeQueryString({a: 'A', b: 'B'})).to.equal('a=A&b=B');
+  });
+  it('should coerce to string', () => {
+    expect(serializeQueryString({a: 1, b: true})).to.equal('a=1&b=true');
+  });
+  it('should encode values and keys', () => {
+    expect(serializeQueryString({'a+b': 'A+B'})).to.equal('a%2Bb=A%2BB');
+  });
+  it('should serialize multiple valued parameters', () => {
+    expect(serializeQueryString({a: [1,2,3], b: true})).to.equal(
+        'a=1&a=2&a=3&b=true');
+  });
+});
+
+
+describe('assertHttpsUrl/isSecureUrl', () => {
   const referenceElement = document.createElement('div');
   it('should NOT allow null or undefined, but allow empty string', () => {
     expect(() => {
@@ -196,26 +260,34 @@ describe('assertHttpsUrl', () => {
   });
   it('should allow https', () => {
     assertHttpsUrl('https://twitter.com', referenceElement);
+    expect(isSecureUrl('https://twitter.com')).to.be.true;
   });
   it('should allow protocol relative', () => {
     assertHttpsUrl('//twitter.com', referenceElement);
+    // `isSecureUrl` always resolves relative URLs.
+    expect(isSecureUrl('//twitter.com'))
+        .to.be.equal(window.location.protocol == 'https:');
   });
   it('should allow localhost with http', () => {
     assertHttpsUrl('http://localhost:8000/sfasd', referenceElement);
+    expect(isSecureUrl('http://localhost:8000/sfasd')).to.be.true;
   });
   it('should allow localhost with http suffix', () => {
     assertHttpsUrl('http://iframe.localhost:8000/sfasd', referenceElement);
+    expect(isSecureUrl('http://iframe.localhost:8000/sfasd')).to.be.true;
   });
 
   it('should fail on http', () => {
     expect(() => {
       assertHttpsUrl('http://twitter.com', referenceElement);
     }).to.throw(/source must start with/);
+    expect(isSecureUrl('http://twitter.com')).to.be.false;
   });
   it('should fail on http with localhost in the name', () => {
     expect(() => {
       assertHttpsUrl('http://foolocalhost', referenceElement);
     }).to.throw(/source must start with/);
+    expect(isSecureUrl('http://foolocalhost')).to.be.false;
   });
 });
 
@@ -265,22 +337,6 @@ describe('removeFragment', () => {
   });
 });
 
-describe('getOrigin', () => {
-  it('should parse https://twitter.com/path#abc', () => {
-    expect(getOrigin(parseUrl('https://twitter.com/path#abc')))
-        .to.equal('https://twitter.com');
-    expect(parseUrl('https://twitter.com/path#abc').origin)
-        .to.equal('https://twitter.com');
-  });
-
-  it('should parse data:12345', () => {
-    expect(getOrigin(parseUrl('data:12345')))
-        .to.equal('data:12345');
-    expect(parseUrl('data:12345').origin)
-        .to.equal('data:12345');
-  });
-});
-
 describe('addParamToUrl', () => {
   let url;
 
@@ -303,6 +359,16 @@ describe('addParamToUrl', () => {
     expect(url).to.equal('https://www.ampproject.org/get/here?hello=world&foo=bar&elementId=n1');
     url = addParamToUrl(url, 'ampUserId', '12345');
     expect(url).to.equal('https://www.ampproject.org/get/here?hello=world&foo=bar&elementId=n1&ampUserId=12345');
+  });
+
+  it('should optionally add params to the front', () => {
+    let url = addParamToUrl('https://www.ampproject.org/get/here?hello=world&foo=bar',
+        'elementId', 'n1', /* addToFront */ true);
+    expect(url).to.equal('https://www.ampproject.org/get/here?elementId=n1&hello=world&foo=bar');
+
+    url = addParamToUrl('https://www.ampproject.org/get/here',
+        'elementId', 'n1', /* addToFront */ true);
+    expect(url).to.equal('https://www.ampproject.org/get/here?elementId=n1');
   });
 
   it('should encode uri values', () => {
@@ -331,6 +397,13 @@ describe('addParamsToUrl', () => {
     url = addParamsToUrl(url, params);
 
     expect(url).to.equal('https://www.ampproject.org/get/here?hello=world&foo=bar#hash-value');
+
+    expect(addParamsToUrl('http://example.com', {
+      firstname: 'Cool',
+      lastname: 'Beans',
+      interests: ['Basketball', 'Food', 'Running'],
+    })).to.equal('http://example.com?firstname=Cool&lastname=Beans&' +
+        'interests=Basketball&interests=Food&interests=Running');
   });
 
   it('should keep host and path intact', () => {
@@ -370,7 +443,7 @@ describe('getSourceOrigin/Url', () => {
   function testOrigin(href, sourceHref) {
     it('should return the source origin/url from ' + href, () => {
       expect(getSourceUrl(href)).to.equal(sourceHref);
-      expect(getSourceOrigin(href)).to.equal(getOrigin(sourceHref));
+      expect(getSourceOrigin(href)).to.equal(parseUrl(sourceHref).origin);
     });
   }
 
@@ -503,4 +576,20 @@ describe('resolveRelativeUrl', () => {
       'file?f=0#h',
       parseUrl('http://base.org/bfile?bf=0#bh'),
       'http://base.org/file?f=0#h');
+});
+
+
+describe('getCorsUrl', () => {
+  it('should error if __amp_source_origin is set', () => {
+    expect(() => getCorsUrl(window, 'http://example.com/?__amp_source_origin'))
+        .to.throw(/Source origin is not allowed in/);
+    expect(() => getCorsUrl(window, 'http://example.com/?name=hello'))
+        .to.not.throw;
+  });
+
+  it('should set __amp_source_origin as a url param', () => {
+    expect(getCorsUrl(window, 'http://example.com/?name=hello'))
+        .to.equal('http://example.com/?name=hello&' +
+            '__amp_source_origin=http%3A%2F%2Flocalhost%3A9876');
+  });
 });

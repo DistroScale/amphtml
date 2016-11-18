@@ -32,7 +32,40 @@ function toString(value) {
  * @return {boolean}
  */
 export function isArray(value) {
-  return toString(value) === '[object Array]';
+  return Array.isArray(value);
+}
+
+/**
+ * Converts an array-like object to an array.
+ * @param {?IArrayLike<T>|string} arrayLike
+ * @return {!Array<T>}
+ * @template T
+ */
+export function toArray(arrayLike) {
+  if (!arrayLike) {
+    return [];
+  }
+  const array = new Array(arrayLike.length);
+  for (let i = 0; i < arrayLike.length; i++) {
+    array[i] = arrayLike[i];
+  }
+  return array;
+}
+
+/**
+ * Returns a map-like object.
+ * If opt_initial is provided, copies its own properties into the
+ * newly created object.
+ * @param {T=} opt_initial This should typically be an object literal.
+ * @return {T}
+ * @template T
+ */
+export function map(opt_initial) {
+  const obj = Object.create(null);
+  if (opt_initial) {
+    Object.assign(obj, opt_initial);
+  }
+  return obj;
 }
 
 /**
@@ -42,4 +75,24 @@ export function isArray(value) {
  */
 export function isObject(value) {
   return toString(value) === '[object Object]';
+}
+
+/**
+ * Determines if value is of number type and finite.
+ * NaN and Infinity are not considered a finite number.
+ * String numbers are not considered numbers.
+ * @param {*} value
+ * @return {boolean}
+ */
+export function isFiniteNumber(value) {
+  return (typeof value === 'number' && isFinite(value));
+}
+
+/**
+ * Determines if value is of FormData type.
+ * @param {*} value
+ * @return {boolean}
+ */
+export function isFormData(value) {
+  return toString(value) === '[object FormData]';
 }

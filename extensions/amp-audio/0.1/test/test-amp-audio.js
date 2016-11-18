@@ -18,7 +18,8 @@ import {AmpAudio} from '../amp-audio';
 import {adopt} from '../../../../src/runtime';
 import {naturalDimensions_} from '../../../../src/layout';
 import {createIframePromise} from '../../../../testing/iframe';
-require('../amp-audio');
+import * as sinon from 'sinon';
+import '../amp-audio';
 
 adopt(window);
 
@@ -154,13 +155,26 @@ describe('amp-audio', () => {
       return savedCreateElement.call(document, name);
     };
     const element = document.createElement('div');
-    element.toggleFallback = sinon.spy();
+    element.toggleFallback = sandbox.spy();
     const audio = new AmpAudio(element);
     const promise = audio.layoutCallback();
     document.createElement = savedCreateElement;
     return promise.then(() => {
-      expect(audio.audio_).to.be.undefined;
       expect(element.toggleFallback.callCount).to.equal(1);
+    });
+  });
+
+  it('should propagate ARIA attributes', () => {
+    return attachAndRun({
+      src: 'https://origin.com/audio.mp3',
+      'aria-label': 'Hello',
+      'aria-labelledby': 'id2',
+      'aria-describedby': 'id3',
+    }).then(a => {
+      const audio = a.querySelector('audio');
+      expect(audio.getAttribute('aria-label')).to.equal('Hello');
+      expect(audio.getAttribute('aria-labelledby')).to.equal('id2');
+      expect(audio.getAttribute('aria-describedby')).to.equal('id3');
     });
   });
 });

@@ -17,26 +17,19 @@
 @import "../../../third_party/optimized-svg-icons/amp-social-share-svgs.css";
 
 amp-social-share {
-  height: 44px;
-  width: 60px;
-}
-
-amp-social-share span {
-  display: block;
-  border-radius: 5px;
-  height: 100%;
-  width: 100%;
-}
-
-amp-social-share a {
-  display: block;
-  width: 100%;
-  height: 100%;
   background-repeat: no-repeat;
   background-position: center;
   background-size: contain;
   text-decoration: none;
+  cursor: pointer;
+  position: relative;
 }
+
+/**
+ * Note: Attribute selectors were used initially here but we switched to using
+ * class-based selector to style each type because of a bug on iOS Safari 8.
+ * See https://github.com/ampproject/amphtml/issues/4277 for more details.
+ */
 
 /* Twitter Styling */
 .amp-social-share-twitter {
@@ -61,6 +54,11 @@ amp-social-share a {
 /* Google+ Styling */
 .amp-social-share-gplus {
   background-color: #dc4e41;
+}
+
+/* Tumblr Styling */
+.amp-social-share-tumblr {
+  background-color: #3c5a77;
 }
 
 /* Email Styling */

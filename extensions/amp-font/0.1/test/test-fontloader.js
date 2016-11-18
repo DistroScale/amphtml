@@ -25,7 +25,7 @@ adopt(window);
 const FONT_FACE_ = `
   @font-face {
     font-family: 'Comic AMP';
-    src: url(/base/examples/fonts/ComicAMP.ttf) format('truetype');
+    src: url(/examples/fonts/ComicAMP.ttf) format('truetype');
   }
 `;
 
@@ -63,6 +63,7 @@ describe('FontLoader', () => {
   let setupFontLoadSpy;
   let setupLoadWithPolyfillSpy;
   let setupDisposeSpy;
+  let setupCreateElementsSpy;
 
   beforeEach(() => {
     sandbox = sinon.sandbox.create();
@@ -86,8 +87,8 @@ describe('FontLoader', () => {
       textEl.textContent =
           'Neque porro quisquam est qui dolorem ipsum quia dolor';
       iframe.doc.body.appendChild(textEl);
-      setupFontCheckSpy = sandbox.spy(iframe.doc.fonts, 'check');
-      setupFontLoadSpy = sandbox.spy(iframe.doc.fonts, 'load');
+      setupFontCheckSpy = sandbox./*OK*/spy(iframe.doc.fonts, 'check');
+      setupFontLoadSpy = sandbox./*OK*/spy(iframe.doc.fonts, 'load');
       fontloader = new FontLoader(iframe.win);
       return Promise.resolve(iframe);
     });
@@ -161,6 +162,10 @@ describe('FontLoader', () => {
         iframe.doc.documentElement.classList.add('comic-amp-font-loaded');
         const finalElementsCount = iframe.doc.getElementsByTagName('*').length;
         expect(initialElementsCount).to.be.below(finalElementsCount);
+        const createdContainer = iframe.doc.querySelectorAll('body > div')[1];
+        expect(createdContainer.fontStyle).to.equal('normal');
+        expect(createdContainer.fontWeight).to.equal('400');
+        expect(createdContainer.fontVariant).to.equal('normal');
       }).catch(() => {
         assert.fail('Font load failed');
       });
@@ -195,7 +200,13 @@ describe('FontLoader', () => {
       iframe.doc.body.appendChild(fontDiv);
       fontloader.defaultFontElements_ = [defaultDiv];
       fontloader.customFontElement_ = fontDiv;
-      expect(fontloader.compareMeasurements_()).to.be.true;
+      return fontloader.load(FONT_CONFIG, 3000).then(() => {
+        fontloader.defaultFontElements_ = [defaultDiv];
+        fontloader.customFontElement_ = fontDiv;
+        expect(fontloader.compareMeasurements_()).to.be.true;
+      }).catch(() => {
+        assert.fail('Font load failed');
+      });
     });
   });
 });

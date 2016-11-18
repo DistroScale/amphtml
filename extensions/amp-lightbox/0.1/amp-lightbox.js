@@ -17,25 +17,45 @@
 import {Gestures} from '../../../src/gesture';
 import {Layout} from '../../../src/layout';
 import {SwipeXYRecognizer} from '../../../src/gesture-recognizers';
-import {historyFor} from '../../../src/history';
+import {dev} from '../../../src/log';
+import {historyForDoc} from '../../../src/history';
+import {vsyncFor} from '../../../src/vsync';
 import * as st from '../../../src/style';
 
 
 class AmpLightbox extends AMP.BaseElement {
+
+  /** @param {!AmpElement} element */
+  constructor(element) {
+    super(element);
+
+    /** @private {?Element} */
+    this.container_ = null;
+
+    /** @private {number} */
+    this.historyId_ = -1;
+
+    /** @private {boolean} */
+    this.active_ = false;
+
+    /**  @private {?function(this:AmpLightbox, Event)}*/
+    this.boundCloseOnEscape_ = null;
+  }
 
   /** @override */
   isLayoutSupported(layout) {
     return layout == Layout.NODISPLAY;
   }
 
-  /** @override */
-  isReadyToBuild() {
-    // Always defer building until DOMReady.
-    return false;
-  }
+  /**
+   * Lazily builds the lightbox DOM on the first open.
+   * @private
+   */
+  initialize_() {
+    if (this.container_) {
+      return;
+    }
 
-  /** @override */
-  buildCallback() {
     st.setStyles(this.element, {
       position: 'fixed',
       zIndex: 1000,
@@ -47,7 +67,6 @@ class AmpLightbox extends AMP.BaseElement {
 
     const children = this.getRealChildren();
 
-    /** @private {!Element} */
     this.container_ = this.element.ownerDocument.createElement('div');
     this.applyFillContent(this.container_);
     this.element.appendChild(this.container_);
@@ -55,15 +74,13 @@ class AmpLightbox extends AMP.BaseElement {
       this.container_.appendChild(child);
     });
 
+    this.registerAction('open', this.activate.bind(this));
     this.registerAction('close', this.close.bind(this));
 
     const gestures = Gestures.get(this.element);
     gestures.onGesture(SwipeXYRecognizer, () => {
       // Consume to block scroll events and side-swipe.
     });
-
-    /** @private {number} */
-    this.historyId_ = -1;
   }
 
   /** @override */
@@ -73,28 +90,37 @@ class AmpLightbox extends AMP.BaseElement {
 
   /** @override */
   activate() {
-    /**  @private {function(this:AmpLightbox, Event)}*/
+    if (this.active_) {
+      return;
+    }
+    this.initialize_();
     this.boundCloseOnEscape_ = this.closeOnEscape_.bind(this);
-    this.getWin().document.documentElement.addEventListener(
+    this.win.document.documentElement.addEventListener(
         'keydown', this.boundCloseOnEscape_);
-    this.requestFullOverlay();
-    this.getViewport().resetTouchZoom();
-    this.getViewport().hideFixedLayer();
-    this.element.style.display = '';
-    this.element.style.opacity = 0;
+    this.getViewport().enterLightboxMode();
 
-    // TODO(dvoytenko): use new animations support instead.
-    this.element.style.transition = 'opacity 0.1s ease-in';
-    requestAnimationFrame(() => {
-      this.element.style.opacity = '';
+    this.mutateElement(() => {
+      st.setStyles(this.element, {
+        display: '',
+        opacity: 0,
+        // TODO(dvoytenko): use new animations support instead.
+        transition: 'opacity 0.1s ease-in',
+      });
+      vsyncFor(this.win).mutate(() => {
+        st.setStyle(this.element, 'opacity', '');
+      });
+    }).then(() => {
+      const container = dev().assertElement(this.container_);
+      this.updateInViewport(container, true);
+      this.scheduleLayout(container);
+      this.scheduleResume(container);
     });
-
-    this.scheduleLayout(this.container_);
-    this.updateInViewport(this.container_, true);
 
     this.getHistory_().push(this.close.bind(this)).then(historyId => {
       this.historyId_ = historyId;
     });
+
+    this.active_ = true;
   }
 
   /**
@@ -109,20 +135,23 @@ class AmpLightbox extends AMP.BaseElement {
   }
 
   close() {
-    this.cancelFullOverlay();
-    this.getViewport().showFixedLayer();
-    this.element.style.display = 'none';
+    if (!this.active_) {
+      return;
+    }
+    this.getViewport().leaveLightboxMode();
+    this./*OK*/collapse();
     if (this.historyId_ != -1) {
       this.getHistory_().pop(this.historyId_);
     }
-    this.getWin().document.documentElement.removeEventListener(
+    this.win.document.documentElement.removeEventListener(
         'keydown', this.boundCloseOnEscape_);
     this.boundCloseOnEscape_ = null;
-    this.schedulePause(this.container_);
+    this.schedulePause(dev().assertElement(this.container_));
+    this.active_ = false;
   }
 
   getHistory_() {
-    return historyFor(this.element.ownerDocument.defaultView);
+    return historyForDoc(this.getAmpDoc());
   }
 }
 

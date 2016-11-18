@@ -14,12 +14,13 @@
  * limitations under the License.
  */
 
-import {documentContains} from '../dom';
 import {dev, user} from '../log';
-import {platform} from '../platform';
-import {setStyle, setStyles} from '../style';
+import {platformFor} from '../platform';
+import {getStyle, setStyle, setStyles} from '../style';
 
 const TAG = 'FixedLayer';
+
+const DECLARED_FIXED_PROP = '__AMP_DECLFIXED';
 
 
 /**
@@ -35,23 +36,26 @@ const TAG = 'FixedLayer';
  */
 export class FixedLayer {
   /**
-   * @param {!Document} doc
-   * @param {!Vsync} vsync
+   * @param {!./ampdoc-impl.AmpDoc} ampdoc
+   * @param {!./vsync-impl.Vsync} vsync
    * @param {number} paddingTop
    * @param {boolean} transfer
    */
-  constructor(doc, vsync, paddingTop, transfer) {
-    /** @const {!Document} */
-    this.doc = doc;
+  constructor(ampdoc, vsync, paddingTop, transfer) {
+    /** @const {!./ampdoc-impl.AmpDoc} */
+    this.ampdoc = ampdoc;
 
-    /** @private @const {!Vsync} */
+    /** @private @const */
     this.vsync_ = vsync;
 
     /** @private {number} */
     this.paddingTop_ = paddingTop;
 
+    /** @private {number} */
+    this.committedPaddingTop_ = paddingTop;
+
     /** @private @const {boolean} */
-    this.transfer_ = transfer;
+    this.transfer_ = transfer && ampdoc.isSingleDoc();
 
     /** @private {?Element} */
     this.fixedLayer_ = null;
@@ -79,7 +83,7 @@ export class FixedLayer {
    * Must be always called after DOMReady.
    */
   setup() {
-    const stylesheets = this.doc.styleSheets;
+    const stylesheets = this.ampdoc.getRootNode().styleSheets;
     if (!stylesheets) {
       return;
     }
@@ -99,28 +103,15 @@ export class FixedLayer {
       this.discoverFixedSelectors_(stylesheet.cssRules, fixedSelectors);
     }
 
-    try {
-      fixedSelectors.forEach(selector => {
-        const elements = this.doc.querySelectorAll(selector);
-        for (let i = 0; i < elements.length; i++) {
-          if (i > 10) {
-            // We shouldn't have too many of `fixed` elements.
-            break;
-          }
-          this.setupFixedElement_(elements[i], selector);
-        }
-      });
-    } catch (e) {
-      // Fail quietly.
-      dev.error(TAG, 'Failed to setup fixed elements:', e);
-    }
+    this.trySetupFixedSelectorsNoInline(fixedSelectors);
 
     // Sort in document order.
     this.sortInDomOrder_();
 
+    const platform = platformFor(this.ampdoc.win);
     if (this.fixedElements_.length > 0 && !this.transfer_ &&
             platform.isIos()) {
-      user.warn(TAG, 'Please test this page inside of an AMP Viewer such' +
+      user().warn(TAG, 'Please test this page inside of an AMP Viewer such' +
           ' as Google\'s because the fixed positioning might have slightly' +
           ' different layout.');
     }
@@ -130,12 +121,51 @@ export class FixedLayer {
 
   /**
    * Updates the viewer's padding-top position and recalculates offsets of
-   * all elements.
+   * all elements. The padding update can be transient, in which case the
+   * UI itself is not updated leaving the blank space up top, which is invisible
+   * due to scroll position. This mode saves significant resources. However,
+   * eventhough layout is not updated, the fixed coordinates still need to be
+   * recalculated.
    * @param {number} paddingTop
+   * @param {boolean} opt_transient
    */
-  updatePaddingTop(paddingTop) {
+  updatePaddingTop(paddingTop, opt_transient) {
     this.paddingTop_ = paddingTop;
+    if (!opt_transient) {
+      this.committedPaddingTop_ = paddingTop;
+    }
     this.update();
+  }
+
+  /**
+   * Apply or reset transform style to fixed elements. The existing transition,
+   * if any, is disabled when custom transform is supplied.
+   * @param {?string} transform
+   */
+  transformMutate(transform) {
+    if (transform) {
+      // Apply transform style to all fixed elements
+      this.fixedElements_.forEach(e => {
+        if (e.fixedNow && e.top) {
+          setStyle(e.element, 'transition', 'none');
+          if (e.transform && e.transform != 'none') {
+            setStyle(e.element, 'transform', e.transform + ' ' + transform);
+          } else {
+            setStyle(e.element, 'transform', transform);
+          }
+        }
+      });
+    } else {
+      // Reset transform style to all fixed elements
+      this.fixedElements_.forEach(e => {
+        if (e.fixedNow && e.top) {
+          setStyles(e.element, {
+            transform: '',
+            transition: '',
+          });
+        }
+      });
+    }
   }
 
   /**
@@ -153,12 +183,22 @@ export class FixedLayer {
    * @param {!Element} element
    */
   removeElement(element) {
-    this.removeFixedElement_(element);
-    if (this.fixedLayer_) {
+    const fe = this.removeFixedElement_(element);
+    if (fe && this.fixedLayer_) {
       this.vsync_.mutate(() => {
-        this.returnFromFixedLayer_(element);
+        this.returnFromFixedLayer_(/** @type {FixedElementDef} */ (fe));
       });
     }
+  }
+
+  /**
+   * Whether the element is declared as fixed in any of the user's stylesheets.
+   * Will include any matches, not necessarily currently fixed elements.
+   * @param {!Element} element
+   * @return {boolean}
+   */
+  isDeclaredFixed(element) {
+    return !!element[DECLARED_FIXED_PROP];
   }
 
   /**
@@ -176,7 +216,7 @@ export class FixedLayer {
     // Some of the elements may no longer be in DOM.
     /** @type {!Array<!FixedElementDef>} */
     const toRemove = this.fixedElements_.filter(
-        fe => !documentContains(this.doc, fe.element));
+        fe => !this.ampdoc.contains(fe.element));
     toRemove.forEach(fe => this.removeFixedElement_(fe.element));
 
     // Next, the positioning-related properties will be measured. If a
@@ -185,31 +225,90 @@ export class FixedLayer {
     let hasTransferables = false;
     return this.vsync_.runPromise({
       measure: state => {
+        const autoTopMap = {};
+
+        // Notice that this code intentionally breaks vsync contract.
+        // Unfortunately, there's no way to reliably test whether or not
+        // `top` has been set to a non-auto value on all platforms. To work
+        // this around, this code compares `offsetTop` values with and without
+        // `style.top = auto`.
+
+        // 1. Set all style top to `auto` and calculate the auto-offset.
+        this.fixedElements_.forEach(fe => {
+          setStyle(fe.element, 'top', 'auto');
+        });
+        this.fixedElements_.forEach(fe => {
+          autoTopMap[fe.id] = fe.element./*OK*/offsetTop;
+        });
+
+        // 2. Reset style top.
+        this.fixedElements_.forEach(fe => {
+          setStyle(fe.element, 'top', '');
+        });
+
+        // 3. Calculated fixed info.
         this.fixedElements_.forEach(fe => {
           const element = fe.element;
-          const styles = this.doc.defaultView./*OK*/getComputedStyle(
+          const styles = this.ampdoc.win./*OK*/getComputedStyle(
               element, null);
+          if (!styles) {
+            // Notice that `styles` can be `null`, courtesy of long-standing
+            // Gecko bug: https://bugzilla.mozilla.org/show_bug.cgi?id=548397
+            // See #3096 for more details.
+            state[fe.id] = {
+              fixed: false,
+              transferrable: false,
+              top: '',
+              zIndex: '',
+            };
+            return;
+          }
+
           const position = styles.getPropertyValue('position');
-          const top = styles.getPropertyValue('top');
-          const bottom = styles.getPropertyValue('bottom');
-          const opacity = parseFloat(styles.getPropertyValue('opacity'));
-          const visibility = styles.getPropertyValue('visibility');
           // Element is indeed fixed. Visibility is added to the test to
           // avoid moving around invisible elements.
           const isFixed = (
               position == 'fixed' &&
               element./*OK*/offsetWidth > 0 &&
               element./*OK*/offsetHeight > 0);
+          if (!isFixed) {
+            state[fe.id] = {
+              fixed: false,
+              transferrable: false,
+              top: '',
+              zIndex: '',
+            };
+            return;
+          }
+
+          // Calculate top, assuming that it could implicitly be `auto`.
+          // `getComputedStyle().top` will return `auto` in Safari and the
+          // actual calculated value in all other browsers. To find out whether
+          // or not the `top` was actually set in CSS, this method compares
+          // `offsetTop` with `style.top = 'auto'` and without.
+          let top = styles.getPropertyValue('top');
+          const currentOffsetTop = element./*OK*/offsetTop;
+          const isImplicitAuto = currentOffsetTop == autoTopMap[fe.id];
+          if ((top == 'auto' || isImplicitAuto) && top != '0px') {
+            top = '';
+            if (currentOffsetTop == this.committedPaddingTop_) {
+              top = '0px';
+            }
+          }
+
+          const bottom = styles.getPropertyValue('bottom');
+          const opacity = parseFloat(styles.getPropertyValue('opacity'));
           // Transferability requires element to be fixed and top or bottom to
-          // be styled with `0`. Also, do not transfer transparent or invisible
+          // be styled with `0`. Also, do not transfer transparent
           // elements - that's a lot of work for no benefit.  Additionally,
-          // invisible/transparent elements used for "service" needs and thus
-          // best kept in the original tree.  Also, the `height` is constrained
-          // to at most 300px. This is to avoid transfering of more substantial
-          // sections for now. Likely to be relaxed in the future.
+          // transparent elements used for "service" needs and thus
+          // best kept in the original tree. The visibility, however, is not
+          // considered because `visibility` CSS is inherited. Also, the
+          // `height` is constrained to at most 300px. This is to avoid
+          // transfering of more substantial sections for now. Likely to be
+          // relaxed in the future.
           const isTransferrable = (
               isFixed &&
-              visibility != 'hidden' &&
               opacity > 0 &&
               element./*OK*/offsetHeight < 300 &&
               (this.isAllowedCoord_(top) || this.isAllowedCoord_(bottom)));
@@ -219,16 +318,17 @@ export class FixedLayer {
           state[fe.id] = {
             fixed: isFixed,
             transferrable: isTransferrable,
-            top: top,
+            top,
             zIndex: styles.getPropertyValue('z-index'),
+            transform: styles.getPropertyValue('transform'),
           };
         });
       },
       mutate: state => {
         if (hasTransferables && this.transfer_) {
           const fixedLayer = this.getFixedLayer_();
-          if (fixedLayer.className != this.doc.body.className) {
-            fixedLayer.className = this.doc.body.className;
+          if (fixedLayer.className != this.ampdoc.getBody().className) {
+            fixedLayer.className = this.ampdoc.getBody().className;
           }
         }
         this.fixedElements_.forEach((fe, i) => {
@@ -240,7 +340,7 @@ export class FixedLayer {
       },
     }, {}).catch(error => {
       // Fail silently.
-      dev.error(TAG, 'Failed to mutate fixed elements:', error);
+      dev().error(TAG, 'Failed to mutate fixed elements:', error);
     });
   }
 
@@ -251,6 +351,45 @@ export class FixedLayer {
    */
   isAllowedCoord_(s) {
     return (!!s && parseInt(s, 10) == 0);
+  }
+
+  /**
+   * Calls `setupFixedSelectors_` in a try-catch.
+   * Fails quietly with a dev error if call fails.
+   * This method should not be inlined to prevent TryCatch deoptimization.
+   * NoInline keyword at the end of function name also prevents Closure compiler
+   * from inlining the function.
+   * @param {!Array<string>} fixedSelectors
+   * @private
+   */
+  trySetupFixedSelectorsNoInline(fixedSelectors) {
+    try {
+      this.setupFixedSelectors_(fixedSelectors);
+    } catch (e) {
+      // Fail quietly.
+      dev().error(TAG, 'Failed to setup fixed elements:', e);
+    }
+  }
+
+  /**
+   * Calls `setupFixedElement_` for up to 10 elements matching each selector
+   * in `fixedSelectors`.
+   * @param {!Array<string>} fixedSelectors
+   * @private
+   */
+  setupFixedSelectors_(fixedSelectors) {
+    for (let i = 0; i < fixedSelectors.length; i++) {
+      const fixedSelector = fixedSelectors[i];
+      const elements = this.ampdoc.getRootNode().querySelectorAll(
+          fixedSelector);
+      for (let j = 0; j < elements.length; j++) {
+        if (j > 10) {
+          // We shouldn't have too many of `fixed` elements.
+          break;
+        }
+        this.setupFixedElement_(elements[j], fixedSelector);
+      }
+    }
   }
 
   /**
@@ -277,9 +416,10 @@ export class FixedLayer {
       // A new entry.
       const fixedId = 'F' + (this.counter_++);
       element.setAttribute('i-amp-fixedid', fixedId);
+      element[DECLARED_FIXED_PROP] = true;
       fe = {
         id: fixedId,
-        element: element,
+        element,
         selectors: [selector],
       };
       this.fixedElements_.push(fe);
@@ -290,15 +430,21 @@ export class FixedLayer {
    * Removes element from the fixed layer.
    *
    * @param {!Element} element
+   * @return {FixedElementDef|undefined}
    * @private
    */
   removeFixedElement_(element) {
     for (let i = 0; i < this.fixedElements_.length; i++) {
       if (this.fixedElements_[i].element == element) {
+        this.vsync_.mutate(() => {
+          setStyle(element, 'top', '');
+        });
+        const fe = this.fixedElements_[i];
         this.fixedElements_.splice(i, 1);
-        break;
+        return fe;
       }
     }
+    return undefined;
   }
 
   /** @private */
@@ -328,30 +474,29 @@ export class FixedLayer {
   mutateFixedElement_(fe, index, state) {
     const element = fe.element;
     const oldFixed = fe.fixedNow;
-    if (oldFixed == state.fixed) {
-      return;
-    }
 
     fe.fixedNow = state.fixed;
+    fe.top = state.fixed ? state.top : '';
+    fe.transform = state.transform;
     if (state.fixed) {
       // Update `top`. This is necessary to adjust position to the viewer's
       // paddingTop.
-      if (state.top) {
-        element.style.top = `calc(${state.top} + ${this.paddingTop_}px)`;
-      }
+      setStyle(element, 'top', state.top ?
+          `calc(${state.top} + ${this.paddingTop_}px)` :
+          '');
 
       // Move element to the fixed layer.
-      if (this.transfer_) {
+      if (!oldFixed && this.transfer_) {
         if (state.transferrable) {
           this.transferToFixedLayer_(fe, index, state);
         } else {
           this.returnFromFixedLayer_(fe);
         }
       }
-    } else {
+    } else if (oldFixed) {
       // Reset `top` which was assigned above.
-      if (element.style.top) {
-        element.style.top = '';
+      if (getStyle(element, 'top')) {
+        setStyle(element, 'top', '');
       }
 
       // Move back to the BODY layer and reset transfer z-index.
@@ -371,20 +516,21 @@ export class FixedLayer {
       return;
     }
 
-    dev.fine(TAG, 'transfer to fixed:', fe.id, fe.element);
-    user.warn(TAG, 'In order to improve scrolling performance in Safari,' +
+    dev().fine(TAG, 'transfer to fixed:', fe.id, fe.element);
+    user().warn(TAG, 'In order to improve scrolling performance in Safari,' +
         ' we now move the element to a fixed positioning layer:', fe.element);
 
     if (!fe.placeholder) {
       // Never been transfered before: ensure that it's properly configured.
       setStyle(element, 'pointer-events', 'initial');
-      fe.placeholder = this.doc.createElement('i-amp-fp');
+      fe.placeholder = this.ampdoc.win.document.createElement('i-amp-fp');
       fe.placeholder.setAttribute('i-amp-fixedid', fe.id);
       setStyle(fe.placeholder, 'display', 'none');
     }
 
     // Calculate z-index based on the declared z-index and DOM position.
-    element.style.zIndex = `calc(${10000 + index} + ${state.zIndex || 0})`;
+    setStyle(element, 'zIndex',
+        `calc(${10000 + index} + ${state.zIndex || 0})`);
 
     element.parentElement.replaceChild(fe.placeholder, element);
     this.getFixedLayer_().appendChild(element);
@@ -394,7 +540,7 @@ export class FixedLayer {
     const matches = fe.selectors.some(
         selector => this.matches_(element, selector));
     if (!matches) {
-      user.warn(TAG,
+      user().warn(TAG,
           'Failed to move the element to the fixed position layer.' +
           ' This is most likely due to the compound CSS selector:',
           fe.element);
@@ -419,7 +565,7 @@ export class FixedLayer {
       }
     } catch (e) {
       // Fail silently.
-      dev.error(TAG, 'Failed to test query match:', e);
+      dev().error(TAG, 'Failed to test query match:', e);
     }
     return false;
   }
@@ -429,13 +575,13 @@ export class FixedLayer {
    * @private
    */
   returnFromFixedLayer_(fe) {
-    if (!fe.placeholder || !documentContains(this.doc, fe.placeholder)) {
+    if (!fe.placeholder || !this.ampdoc.contains(fe.placeholder)) {
       return;
     }
-    dev.fine(TAG, 'return from fixed:', fe.id, fe.element);
-    if (documentContains(this.doc, fe.element)) {
-      if (fe.element.style.zIndex) {
-        fe.element.style.zIndex = '';
+    dev().fine(TAG, 'return from fixed:', fe.id, fe.element);
+    if (this.ampdoc.contains(fe.element)) {
+      if (getStyle(fe.element, 'zIndex')) {
+        setStyle(fe.element, 'zIndex', '');
       }
       fe.placeholder.parentElement.replaceChild(fe.element, fe.placeholder);
     } else {
@@ -447,10 +593,11 @@ export class FixedLayer {
    * @return {?Element}
    */
   getFixedLayer_() {
+    // This mode is only allowed for a single-doc case.
     if (!this.transfer_ || this.fixedLayer_) {
       return this.fixedLayer_;
     }
-    this.fixedLayer_ = this.doc.createElement('body');
+    this.fixedLayer_ = this.ampdoc.win.document.createElement('body');
     this.fixedLayer_.id = '-amp-fixedlayer';
     setStyles(this.fixedLayer_, {
       position: 'absolute',
@@ -478,7 +625,15 @@ export class FixedLayer {
       transition: 'none',
       visibility: 'visible',
     });
-    this.doc.documentElement.appendChild(this.fixedLayer_);
+    this.ampdoc.win.document.documentElement.appendChild(this.fixedLayer_);
+    // TODO(erwinm, #4097): Remove this when safari technology preview has merged
+    // the fix for https://github.com/ampproject/amphtml/issues/4047
+    // https://bugs.webkit.org/show_bug.cgi?id=159791 which is in r202950.
+    if (this.fixedLayer_.style['webkitAnimation'] !== undefined) {
+      this.fixedLayer_.style['webkitAnimation'] = 'none';
+    } else if (this.fixedLayer_.style['WebkitAnimation'] !== undefined) {
+      this.fixedLayer_.style['WebkitAnimation'] = 'none';
+    }
     return this.fixedLayer_;
   }
 
@@ -507,10 +662,12 @@ export class FixedLayer {
 /**
  * @typedef {{
  *   id: string,
- *   selectors: [],
+ *   selectors: !Array,
  *   element: !Element,
- *   placeholder: ?Element,
- *   fixedNow: boolean,
+ *   placeholder: (?Element|undefined),
+ *   fixedNow: (boolean|undefined),
+ *   top: (string|undefined),
+ *   transform: (string|undefined),
  * }}
  */
 let FixedElementDef;

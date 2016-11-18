@@ -30,7 +30,7 @@ if (!window.validatorLoad) {
   })();
 }
 
-describe('example', function() {
+describe.configure().retryOnSaucelabs().run('example', function() {
   // TODO(@cramforce): Remove when test is hermetic.
   this.timeout(5000);
 
@@ -47,11 +47,13 @@ describe('example', function() {
     'metadata-examples/review-microdata.amp.html',
     'metadata-examples/video-json-ld.amp.html',
     'metadata-examples/video-microdata.amp.html',
+    'a4a.amp.html',
     'article.amp.html',
     'analytics.amp.html',
     'analytics-notification.amp.html',
     'everything.amp.html',
     'facebook.amp.html',
+    'gfycat.amp.html',
     'instagram.amp.html',
     'released.amp.html',
     'soundcloud.amp.html',
@@ -72,6 +74,7 @@ describe('example', function() {
    */
   const errorWhitelist = [
     /GENERAL_DISALLOWED_TAG script viewer-integr.js/,
+    /DISALLOWED_TAG content/,  // Experiments with shadow slots
   ];
 
   const usedWhitelist = [];
@@ -82,8 +85,9 @@ describe('example', function() {
 
   examples.forEach(filename => {
     it(filename + ' should validate', () => {
-      const url = '/base/examples/' + filename;
+      const url = '/examples/' + filename;
       return get(url).then(html => {
+        /* global amp: false */
         const validationResult = amp.validator.validateString(html);
         const errors = [];
         if (validationResult.status == 'FAIL') {

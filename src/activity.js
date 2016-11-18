@@ -14,12 +14,13 @@
  * limitations under the License.
  */
 
-import {getElementService} from './custom-element';
+import {getElementService} from './element-service';
 
 /**
  * @param {!Window} win
  * @return {!Promise<!Activity>}
  */
 export function activityFor(win) {
-  return getElementService(win, 'activity', 'amp-analytics');
+  return /** @type {!Promise<!Activity>} */ (
+      getElementService(win, 'activity', 'amp-analytics'));
 };

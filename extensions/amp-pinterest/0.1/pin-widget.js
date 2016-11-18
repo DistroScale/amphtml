@@ -15,6 +15,7 @@
  */
 
 import {assertHttpsUrl} from '../../../src/url';
+import {openWindowDialog} from '../../../src/dom';
 import {user} from '../../../src/log';
 import {xhrFor} from '../../../src/xhr';
 
@@ -33,7 +34,7 @@ export class PinWidget {
 
   /** @param {!Element} rootElement */
   constructor(rootElement) {
-    user.assert(rootElement.getAttribute('data-url'),
+    user().assert(rootElement.getAttribute('data-url'),
       'The data-url attribute is required for Pin widgets');
     this.element = rootElement;
     this.xhr = xhrFor(rootElement.ownerDocument.defaultView);
@@ -51,9 +52,9 @@ export class PinWidget {
     const log = el.getAttribute('data-pin-log');
     if (href) {
       if (shouldPop) {
-        window.open(href, '_pinit', POP);
+        openWindowDialog(window, href, '_pinit', POP);
       } else {
-        window.open(`${href}?amp=1&guid=${Util.guid}`, '_blank');
+        openWindowDialog(window, `${href}?amp=1&guid=${Util.guid}`, '_blank');
       }
     }
     if (log) {

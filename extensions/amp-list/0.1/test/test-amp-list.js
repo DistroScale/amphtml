@@ -15,8 +15,9 @@
  */
 
 import {AmpList} from '../amp-list';
+import {ampdocServiceFor} from '../../../../src/ampdoc';
 import {templatesFor} from '../../../../src/template';
-import {xhrFor} from '../../../../src/xhr';
+import {installXhrService} from '../../../../src/service/xhr-impl';
 import * as sinon from 'sinon';
 
 
@@ -37,11 +38,14 @@ describe('amp-list component', () => {
     templates = templatesFor(window);
     templatesMock = sandbox.mock(templates);
 
-    xhr = xhrFor(window);
+    xhr = installXhrService(window);
     xhrMock = sandbox.mock(xhr);
+
+    const ampdoc = ampdocServiceFor(window).getAmpDoc();
 
     element = document.createElement('div');
     element.setAttribute('src', 'https://data.com/list.json');
+    element.getAmpDoc = () => ampdoc;
     list = new AmpList(element);
     list.buildCallback();
     listMock = sandbox.mock(list);
@@ -65,11 +69,11 @@ describe('amp-list component', () => {
     const newHeight = 127;
     const itemElement = document.createElement('div');
     itemElement.style.height = newHeight + 'px';
-    const xhrPromise = Promise.resolve({items: items});
+    const xhrPromise = Promise.resolve({items});
     const renderPromise = Promise.resolve([itemElement]);
     let measureFunc;
     xhrMock.expects('fetchJson').withExactArgs('https://data.com/list.json',
-        sinon.match(opts => !opts.credentials))
+        sinon.match(opts => opts.credentials === undefined))
         .returns(xhrPromise).once();
     templatesMock.expects('findAndRenderTemplateArray').withExactArgs(
         element, items)
@@ -79,7 +83,8 @@ describe('amp-list component', () => {
         measureFunc = func;
       },
     }).once();
-    listMock.expects('attemptChangeHeight').withExactArgs(newHeight);
+    listMock.expects('attemptChangeHeight').withExactArgs(newHeight).returns(
+        Promise.resolve());
     return list.layoutCallback().then(() => {
       return Promise.all([xhrPromise, renderPromise]).then(() => {
         expect(list.container_.contains(itemElement)).to.be.true;
@@ -94,17 +99,17 @@ describe('amp-list component', () => {
       {title: 'Title1'},
     ];
     const itemElement = document.createElement('div');
-    const xhrPromise = Promise.resolve({items: items});
+    const xhrPromise = Promise.resolve({items});
     const renderPromise = Promise.resolve([itemElement]);
     xhrMock.expects('fetchJson').withExactArgs('https://data.com/list.json',
-        sinon.match(opts => !opts.credentials))
+        sinon.match(opts => opts.credentials === undefined))
         .returns(xhrPromise).once();
     templatesMock.expects('findAndRenderTemplateArray').withExactArgs(
         element, items)
         .returns(renderPromise).once();
     return list.layoutCallback().then(() => {
       return Promise.all([xhrPromise, renderPromise]).then(() => {
-        expect(list.element.getAttribute('role')).to.equal('list');
+        expect(list.container_.getAttribute('role')).to.equal('list');
         expect(itemElement.getAttribute('role')).to.equal('listitem');
       });
     });
@@ -117,10 +122,10 @@ describe('amp-list component', () => {
     element.setAttribute('role', 'list1');
     const itemElement = document.createElement('div');
     itemElement.setAttribute('role', 'listitem1');
-    const xhrPromise = Promise.resolve({items: items});
+    const xhrPromise = Promise.resolve({items});
     const renderPromise = Promise.resolve([itemElement]);
     xhrMock.expects('fetchJson').withExactArgs('https://data.com/list.json',
-        sinon.match(opts => !opts.credentials))
+        sinon.match(opts => opts.credentials === undefined))
         .returns(xhrPromise).once();
     templatesMock.expects('findAndRenderTemplateArray').withExactArgs(
         element, items)
@@ -135,7 +140,7 @@ describe('amp-list component', () => {
 
   it('should request credentials', () => {
     const items = [];
-    const xhrPromise = Promise.resolve({items: items});
+    const xhrPromise = Promise.resolve({items});
     element.setAttribute('credentials', 'include');
     xhrMock.expects('fetchJson').withExactArgs('https://data.com/list.json',
         sinon.match(opts => {

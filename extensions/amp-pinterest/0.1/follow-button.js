@@ -16,6 +16,7 @@
 
 import {assertHttpsUrl} from '../../../src/url';
 import {user} from '../../../src/log';
+import {openWindowDialog} from '../../../src/dom';
 
 import {Util} from './util';
 
@@ -33,9 +34,9 @@ export class FollowButton {
 
   /** @param {!Element} rootElement */
   constructor(rootElement) {
-    user.assert(rootElement.getAttribute('data-href'),
+    user().assert(rootElement.getAttribute('data-href'),
       'The data-href attribute is required for follow buttons');
-    user.assert(rootElement.getAttribute('data-label'),
+    user().assert(rootElement.getAttribute('data-label'),
       'The data-label attribute is required for follow buttons');
     this.element = rootElement;
     this.label = rootElement.getAttribute('data-label');
@@ -48,7 +49,8 @@ export class FollowButton {
    */
   handleClick(event) {
     event.preventDefault();
-    window.open(this.href, 'pin' + new Date().getTime(), POP_FOLLOW);
+    openWindowDialog(window, this.href, 'pin' + Date.now(),
+        POP_FOLLOW);
     Util.log(`&type=button_follow&href=${this.href}`);
   }
 

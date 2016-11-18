@@ -16,6 +16,8 @@
 
 import {createIframePromise} from '../../testing/iframe';
 import {installVideo} from '../../builtins/amp-video';
+import {installVideoManagerForDoc} from '../../src/service/video-manager-impl';
+import * as sinon from 'sinon';
 
 describe('amp-video', () => {
 
@@ -36,6 +38,7 @@ describe('amp-video', () => {
   function getVideo(attributes, children, opt_beforeLayoutCallback) {
     return createIframePromise(
         true, opt_beforeLayoutCallback).then(iframe => {
+          installVideoManagerForDoc(iframe.win.document);
           installVideo(iframe.win);
           const v = iframe.doc.createElement('amp-video');
           for (const key in attributes) {
@@ -69,16 +72,17 @@ describe('amp-video', () => {
       width: 160,
       height: 90,
       'controls': '',
-      'autoplay': '',
       'muted': '',
       'loop': '',
     }).then(v => {
       const video = v.querySelector('video');
       expect(video.tagName).to.equal('VIDEO');
       expect(video.hasAttribute('controls')).to.be.true;
-      expect(video.hasAttribute('autoplay')).to.be.true;
-      expect(video.hasAttribute('muted')).to.be.true;
       expect(video.hasAttribute('loop')).to.be.true;
+      // autoplay is never propagated to the video element
+      expect(video.hasAttribute('autoplay')).to.be.false;
+      // muted is a deprecated attribute
+      expect(video.hasAttribute('muted')).to.be.false;
     });
   });
 
@@ -136,6 +140,29 @@ describe('amp-video', () => {
     }, sources)).to.be.rejectedWith(/start with/);
   });
 
+  it('should set poster and controls in prerender mode', () => {
+    return getVideo({
+      src: 'video.mp4',
+      width: 160,
+      height: 90,
+      'poster': 'img.png',
+      'controls': '',
+    }, null, function(element) {
+      // Should set appropriate attributes in buildCallback
+      const video = element.querySelector('video');
+      expect(video.getAttribute('poster')).to.equal('img.png');
+      expect(video.getAttribute('controls')).to.exist;
+      expect(video.getAttribute('playsinline')).to.exist;
+      expect(video.getAttribute('webkit-playsinline')).to.exist;
+    }).then(v => {
+      // Same attributes should still be present in layoutCallback.
+      const video = v.querySelector('video');
+      expect(video.tagName).to.equal('VIDEO');
+      expect(video.getAttribute('poster')).to.equal('img.png');
+      expect(video.getAttribute('controls')).to.exist;
+    });
+  });
+
   it('should not set src or preload in prerender mode', () => {
     return getVideo({
       src: 'video.mp4',
@@ -146,14 +173,12 @@ describe('amp-video', () => {
     }, null, function(element) {
       const video = element.querySelector('video');
       expect(video.getAttribute('preload')).to.equal('none');
-      expect(video.getAttribute('poster')).to.equal('img.png');
       expect(video.hasAttribute('src')).to.be.false;
     }).then(v => {
       // Should set appropriate attributes in layoutCallback.
       const video = v.querySelector('video');
       expect(video.tagName).to.equal('VIDEO');
       expect(video.getAttribute('preload')).to.equal('auto');
-      expect(video.getAttribute('poster')).to.equal('img.png');
     });
   });
 
@@ -261,6 +286,22 @@ describe('amp-video', () => {
       const impl = v.implementation_;
       expect(impl.toggleFallback.called).to.be.true;
       expect(impl.toggleFallback.calledWith(true)).to.be.true;
+    });
+  });
+
+  it('should propagate ARIA attributes', () => {
+    return getVideo({
+      src: 'video.mp4',
+      width: 160,
+      height: 90,
+      'aria-label': 'Hello',
+      'aria-labelledby': 'id2',
+      'aria-describedby': 'id3',
+    }).then(v => {
+      const video = v.querySelector('video');
+      expect(video.getAttribute('aria-label')).to.equal('Hello');
+      expect(video.getAttribute('aria-labelledby')).to.equal('id2');
+      expect(video.getAttribute('aria-describedby')).to.equal('id3');
     });
   });
 });

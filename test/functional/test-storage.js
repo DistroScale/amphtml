@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
+import {AmpDocSingle} from '../../src/service/ampdoc-impl';
 import {
   Storage,
   Store,
   LocalStorageBinding,
   ViewerStorageBinding,
 } from '../../src/service/storage-impl';
+import {dev} from '../../src/log';
 import * as sinon from 'sinon';
 
 
@@ -31,6 +33,7 @@ describe('Storage', () => {
   let viewer;
   let viewerMock;
   let windowApi;
+  let ampdoc;
   let viewerBroadcastHandler;
 
   beforeEach(() => {
@@ -49,6 +52,7 @@ describe('Storage', () => {
       document: {},
       location: 'https://acme.com/document1',
     };
+    ampdoc = new AmpDocSingle(windowApi);
 
     binding = {
       loadBlob: () => {},
@@ -56,7 +60,7 @@ describe('Storage', () => {
     };
     bindingMock = sandbox.mock(binding);
 
-    storage = new Storage(windowApi, viewer, binding);
+    storage = new Storage(ampdoc, viewer, binding);
     storage.start_();
   });
 
@@ -441,6 +445,18 @@ describe('LocalStorageBinding', () => {
     sandbox.restore();
   });
 
+  it('should throw if localStorage is not supported', () => {
+    const errorSpy = sandbox.spy(dev(), 'error');
+
+    expect(errorSpy.callCount).to.equal(0);
+    new LocalStorageBinding(windowApi);
+    expect(errorSpy.callCount).to.equal(0);
+
+    delete windowApi.localStorage;
+    new LocalStorageBinding(windowApi);
+    expect(errorSpy.callCount).to.equal(1);
+  });
+
   it('should load store when available', () => {
     localStorageMock.expects('getItem')
         .withExactArgs('amp-store:https://acme.com')
@@ -472,6 +488,19 @@ describe('LocalStorageBinding', () => {
         });
   });
 
+  it('should succeed loadBlob w/o localStorage support', () => {
+    binding.isLocalStorageSupported_ = false;
+    localStorageMock.expects('getItem')
+        .withExactArgs('amp-store:https://acme.com')
+        .throws(new Error('unknown'))
+        .once();
+    return binding.loadBlob('https://acme.com')
+        .then(res => `SUCCESS ${res}`, () => 'ERROR').then(res => {
+          // Resolves with null
+          expect(res).to.equal('SUCCESS null');
+        });
+  });
+
   it('should save store', () => {
     localStorageMock.expects('setItem')
         .withExactArgs('amp-store:https://acme.com', 'BLOB1')
@@ -487,6 +516,19 @@ describe('LocalStorageBinding', () => {
     return binding.saveBlob('https://acme.com', 'BLOB1')
         .then(() => 'SUCCESS', () => 'ERROR').then(res => {
           expect(res).to.equal('ERROR');
+        });
+  });
+
+  it('should succeed saveBlob w/o localStorage support', () => {
+    binding.isLocalStorageSupported_ = false;
+    localStorageMock.expects('setItem')
+        .withExactArgs('amp-store:https://acme.com', 'BLOB1')
+        .throws(new Error('unknown'))
+        .once();
+    // Never reaches setItem
+    return binding.saveBlob('https://acme.com', 'BLOB1')
+        .then(() => 'SUCCESS', () => `ERROR`).then(res => {
+          expect(res).to.equal('SUCCESS');
         });
   });
 });

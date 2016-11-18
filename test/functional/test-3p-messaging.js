@@ -17,21 +17,26 @@
 import {createIframePromise} from '../../testing/iframe';
 import {listenParent} from '../../3p/messaging';
 import {postMessage} from '../../src/iframe-helper';
-import {timer} from '../../src/timer';
+import {timerFor} from '../../src/timer';
 
 describe('3p messaging', () => {
 
   let testWin;
   let iframe;
+  const timer = timerFor(window);
 
   beforeEach(() => {
     return createIframePromise(true).then(i => {
       testWin = i.win;
       testWin.context = {
         location: window.location,
+        amp3pSentinel: 'test',
       };
       iframe = {
         contentWindow: testWin,
+        getAttribute(attr) {
+          return attr == 'data-amp-3p-sentinel' ? 'test' : undefined;
+        },
       };
     });
   });
@@ -107,7 +112,7 @@ describe('3p messaging', () => {
     let progress = '';
     const origOnError = window.onError;
     const expected = new Error('expected');
-    window.onerror = (message, source, lineno, colno, error) => {
+    window.onerror = function(message, source, lineno, colno, error) {
       if (error === expected) {
         return;
       }

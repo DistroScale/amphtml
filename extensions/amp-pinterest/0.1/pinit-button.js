@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import {openWindowDialog} from '../../../src/dom';
 import {user} from '../../../src/log';
 import {xhrFor} from '../../../src/xhr';
 
@@ -40,11 +41,11 @@ export class PinItButton {
 
   /** @param {!Element} rootElement */
   constructor(rootElement) {
-    user.assert(rootElement.getAttribute('data-url'),
+    user().assert(rootElement.getAttribute('data-url'),
       'The data-url attribute is required for Pin It buttons');
-    user.assert(rootElement.getAttribute('data-media'),
+    user().assert(rootElement.getAttribute('data-media'),
       'The data-media attribute is required for Pin It buttons');
-    user.assert(rootElement.getAttribute('data-description'),
+    user().assert(rootElement.getAttribute('data-description'),
       'The data-description attribute is required for Pin It buttons');
     this.element = rootElement;
     this.xhr = xhrFor(rootElement.ownerDocument.defaultView);
@@ -62,7 +63,7 @@ export class PinItButton {
    */
   handleClick(event) {
     event.preventDefault();
-    window.open(this.href, '_pinit', POP);
+    openWindowDialog(window, this.href, '_pinit', POP);
     Util.log('&type=button_pinit');
   }
 

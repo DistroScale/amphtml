@@ -27,7 +27,7 @@
  * @return {?string}
  */
 export function getCookie(win, name) {
-  const cookieString = win.document.cookie;
+  const cookieString = tryGetDocumentCookieNoInline(win);
   if (!cookieString) {
     return null;
   }
@@ -43,6 +43,22 @@ export function getCookie(win, name) {
     }
   }
   return null;
+}
+
+/**
+ * This method should not be inlined to prevent TryCatch deoptimization.
+ * NoInline keyword at the end of function name also prevents Closure compiler
+ * from inlining the function.
+ * @private
+ */
+function tryGetDocumentCookieNoInline(win) {
+  try {
+    return win.document.cookie;
+  } catch (e) {
+    // Act as if no cookie is available. Exceptions can be thrown when
+    // AMP docs are opened on origins that do not allow setting
+    // cookies such as null origins.
+  }
 }
 
 /**
@@ -91,15 +107,16 @@ function trySetCookie(win, name, value, expirationTime, domain) {
     value = 'delete';
     expirationTime = 0;
   }
-  win.document.cookie = encodeURIComponent(name) + '=' +
+  const cookie = encodeURIComponent(name) + '=' +
       encodeURIComponent(value) +
       '; path=/' +
       (domain ? '; domain=' + domain : '') +
       '; expires=' + new Date(expirationTime).toUTCString();
-}
-
-// Clean up cookies set by www.ampproject.org to 2nd level.
-if (location.hostname.indexOf('.ampproject.org') != 0) {
-  trySetCookie(window, '_ga', '', 0, 'ampproject.org');
-  trySetCookie(window, 'AMP_ECID_GOOGLE', '', 0, 'ampproject.org');
+  try {
+    win.document.cookie = cookie;
+  } catch (ignore) {
+    // Do not throw if setting the cookie failed Exceptions can be thrown
+    // when AMP docs are opened on origins that do not allow setting
+    // cookies such as null origins.
+  };
 }

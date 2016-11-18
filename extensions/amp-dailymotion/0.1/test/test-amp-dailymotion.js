@@ -14,8 +14,11 @@
  * limitations under the License.
  */
 
-import {createIframePromise} from '../../../../testing/iframe';
-require('../amp-dailymotion');
+import {
+  createIframePromise,
+  doNotLoadExternalResourcesInTest,
+} from '../../../../testing/iframe';
+import '../amp-dailymotion';
 import {adopt} from '../../../../src/runtime';
 
 adopt(window);
@@ -24,6 +27,7 @@ describe('amp-dailymotion', () => {
 
   function getDailymotion(videoId, optResponsive, optCustomSettings) {
     return createIframePromise().then(iframe => {
+      doNotLoadExternalResourcesInTest(iframe.win);
       const dailymotion = iframe.doc.createElement('amp-dailymotion');
       dailymotion.setAttribute('data-videoid', videoId);
       dailymotion.setAttribute('width', '111');
@@ -34,9 +38,7 @@ describe('amp-dailymotion', () => {
       if (optCustomSettings) {
         dailymotion.setAttribute('data-start', 123);
       }
-      iframe.doc.body.appendChild(dailymotion);
-      dailymotion.implementation_.layoutCallback();
-      return dailymotion;
+      return iframe.addElement(dailymotion);
     });
   }
 
@@ -47,8 +49,6 @@ describe('amp-dailymotion', () => {
       expect(iframe.tagName).to.equal('IFRAME');
       expect(iframe.src).to.equal(
           'https://www.dailymotion.com/embed/video/x2m8jpp?api=1&html=1&app=amp');
-      expect(iframe.getAttribute('width')).to.equal('111');
-      expect(iframe.getAttribute('height')).to.equal('222');
     });
   });
 

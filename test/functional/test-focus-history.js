@@ -15,6 +15,7 @@
  */
 
 import {FocusHistory} from '../../src/focus-history';
+import {installTimerService} from '../../src/service/timer-impl';
 import * as sinon from 'sinon';
 
 
@@ -26,6 +27,7 @@ describe('FocusHistory', () => {
   let eventListeners;
   let testWindow;
   let windowEventListeners;
+  let focusHistory;
 
   beforeEach(() => {
     sandbox = sinon.sandbox.create();
@@ -47,7 +49,10 @@ describe('FocusHistory', () => {
       addEventListener: (eventType, handler) => {
         windowEventListeners[eventType] = handler;
       },
+      setTimeout: window.setTimeout,
+      clearTimeout: window.clearTimeout,
     };
+    installTimerService(testWindow);
     focusHistory = new FocusHistory(testWindow, 10000);
   });
 

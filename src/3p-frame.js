@@ -15,48 +15,52 @@
  */
 
 
+import {dev, user} from './log';
+import {documentInfoForDoc} from './document-info';
 import {getLengthNumeral} from '../src/layout';
-import {getService} from './service';
-import {documentInfoFor} from './document-info';
+import {tryParseJson} from './json';
 import {getMode} from './mode';
-import {preconnectFor} from './preconnect';
+import {getModeObject} from './mode-object';
 import {dashToCamelCase} from './string';
 import {parseUrl, assertHttpsUrl} from './url';
-import {user} from './log';
-import {viewerFor} from './viewer';
+import {viewerForDoc} from './viewer';
+import {urls} from './config';
+import {setStyle} from './style';
+import {domFingerprint} from './utils/dom-fingerprint';
 
 
 /** @type {!Object<string,number>} Number of 3p frames on the for that type. */
-const count = {};
+let count = {};
 
+/** @type {string} */
+let overrideBootstrapBaseUrl;
 
 /**
  * Produces the attributes for the ad template.
  * @param {!Window} parentWindow
  * @param {!Element} element
  * @param {string=} opt_type
+ * @param {Object=} opt_context
  * @return {!Object} Contains
  *     - type, width, height, src attributes of <amp-ad> tag. These have
  *       precedence over the data- attributes.
  *     - data-* attributes of the <amp-ad> tag with the "data-" removed.
  *     - A _context object for internal use.
  */
-function getFrameAttributes(parentWindow, element, opt_type) {
+function getFrameAttributes(parentWindow, element, opt_type, opt_context) {
+  const startTime = Date.now();
   const width = element.getAttribute('width');
   const height = element.getAttribute('height');
   const type = opt_type || element.getAttribute('type');
-  user.assert(type, 'Attribute type required for <amp-ad>: %s', element);
+  user().assert(type, 'Attribute type required for <amp-ad>: %s', element);
   const attributes = {};
   // Do these first, as the other attributes have precedence.
   addDataAndJsonAttributes_(element, attributes);
   attributes.width = getLengthNumeral(width);
   attributes.height = getLengthNumeral(height);
-  const box = element.getLayoutBox();
-  attributes.initialWindowWidth = box.width;
-  attributes.initialWindowHeight = box.height;
   attributes.type = type;
-  const docInfo = documentInfoFor(parentWindow);
-  const viewer = viewerFor(parentWindow);
+  const docInfo = documentInfoForDoc(element);
+  const viewer = viewerForDoc(element);
   let locationHref = parentWindow.location.href;
   // This is really only needed for tests, but whatever. Children
   // see us as the logical origin, so telling them we are about:srcdoc
@@ -68,14 +72,19 @@ function getFrameAttributes(parentWindow, element, opt_type) {
     referrer: viewer.getUnconfirmedReferrerUrl(),
     canonicalUrl: docInfo.canonicalUrl,
     pageViewId: docInfo.pageViewId,
-    clientId: element.getAttribute('ampcid'),
     location: {
       href: locationHref,
     },
     tagName: element.tagName,
-    mode: getMode(),
+    mode: getModeObject(),
+    canary: !!(parentWindow.AMP_CONFIG && parentWindow.AMP_CONFIG.canary),
     hidden: !viewer.isVisible(),
+    amp3pSentinel: generateSentinel(parentWindow),
+    initialIntersection: element.getIntersectionChangeEntry(),
+    domFingerprint: domFingerprint(element),
+    startTime,
   };
+  Object.assign(attributes._context, opt_context);
   const adSrc = element.getAttribute('src');
   if (adSrc) {
     attributes.src = adSrc;
@@ -87,32 +96,45 @@ function getFrameAttributes(parentWindow, element, opt_type) {
  * Creates the iframe for the embed. Applies correct size and passes the embed
  * attributes to the frame via JSON inside the fragment.
  * @param {!Window} parentWindow
- * @param {!Element} element
+ * @param {!Element} parentElement
  * @param {string=} opt_type
+ * @param {Object=} opt_context
  * @return {!Element} The iframe.
  */
-export function getIframe(parentWindow, element, opt_type) {
-  const attributes = getFrameAttributes(parentWindow, element, opt_type);
+export function getIframe(parentWindow, parentElement, opt_type, opt_context) {
+  // Check that the parentElement is already in DOM. This code uses a new and
+  // fast `isConnected` API and thus only used when it's available.
+  dev().assert(
+      parentElement['isConnected'] === undefined ||
+      parentElement['isConnected'] === true,
+      'Parent element must be in DOM');
+  const attributes =
+      getFrameAttributes(parentWindow, parentElement, opt_type, opt_context);
   const iframe = parentWindow.document.createElement('iframe');
   if (!count[attributes.type]) {
     count[attributes.type] = 0;
   }
-  iframe.name = 'frame_' + attributes.type + '_' + count[attributes.type]++;
 
+  const baseUrl = getBootstrapBaseUrl(parentWindow);
+  const host = parseUrl(baseUrl).hostname;
   // Pass ad attributes to iframe via the fragment.
-  const src = getBootstrapBaseUrl(parentWindow) + '#' +
-      JSON.stringify(attributes);
+  const src = baseUrl + '#' + JSON.stringify(attributes);
+  const name = host + '_' + attributes.type + '_' + count[attributes.type]++;
 
   iframe.src = src;
+  iframe.name = name;
   iframe.ampLocation = parseUrl(src);
   iframe.width = attributes.width;
   iframe.height = attributes.height;
-  iframe.style.border = 'none';
   iframe.setAttribute('scrolling', 'no');
+  setStyle(iframe, 'border', 'none');
+  /** @this {!Element} */
   iframe.onload = function() {
     // Chrome does not reflect the iframe readystate.
     this.readyState = 'complete';
   };
+  iframe.setAttribute(
+      'data-amp-3p-sentinel', attributes._context.amp3pSentinel);
   return iframe;
 }
 
@@ -135,11 +157,9 @@ export function addDataAndJsonAttributes_(element, attributes) {
   }
   const json = element.getAttribute('json');
   if (json) {
-    let obj;
-    try {
-      obj = JSON.parse(json);
-    } catch (e) {
-      throw user.createError(
+    const obj = tryParseJson(json);
+    if (obj === undefined) {
+      throw user().createError(
           'Error parsing JSON in json attribute in element %s',
           element);
     }
@@ -150,18 +170,20 @@ export function addDataAndJsonAttributes_(element, attributes) {
 }
 
 /**
- * Prefetches URLs related to the bootstrap iframe.
- * @param {!Window} parentWindow
- * @return {string}
+ * Preloads URLs related to the bootstrap iframe.
+ * @param {!Window} window
+ * @param {!./preconnect.Preconnect} preconnect
  */
-export function prefetchBootstrap(window) {
+export function preloadBootstrap(window, preconnect) {
   const url = getBootstrapBaseUrl(window);
-  const preconnect = preconnectFor(window);
-  preconnect.prefetch(url, 'document');
+  preconnect.preload(url, 'document');
+
   // While the URL may point to a custom domain, this URL will always be
   // fetched by it.
-  preconnect.prefetch(
-      'https://3p.ampproject.net/$internalRuntimeVersion$/f.js', 'script');
+  const scriptUrl = getMode().localDev
+      ? getAdsLocalhost(window) + '/dist.3p/current/integration.js'
+      : `${urls.thirdParty}/$internalRuntimeVersion$/f.js`;
+  preconnect.preload(scriptUrl, 'script');
 }
 
 /**
@@ -172,10 +194,22 @@ export function prefetchBootstrap(window) {
  * @visibleForTesting
  */
 export function getBootstrapBaseUrl(parentWindow, opt_strictForUnitTest) {
-  return getService(window, 'bootstrapBaseUrl', () => {
-    return getCustomBootstrapBaseUrl(parentWindow, opt_strictForUnitTest) ||
-      getDefaultBootstrapBaseUrl(parentWindow);
-  });
+  // The value is cached in a global variable called `bootstrapBaseUrl`;
+  const bootstrapBaseUrl = parentWindow.bootstrapBaseUrl;
+  if (bootstrapBaseUrl) {
+    return bootstrapBaseUrl;
+  }
+  return parentWindow.bootstrapBaseUrl =
+      getCustomBootstrapBaseUrl(parentWindow, opt_strictForUnitTest)
+          || getDefaultBootstrapBaseUrl(parentWindow);
+}
+
+export function setDefaultBootstrapBaseUrlForTesting(url) {
+  overrideBootstrapBaseUrl = url;
+}
+
+export function resetBootstrapBaseUrlForTesting(win) {
+  win.bootstrapBaseUrl = undefined;
 }
 
 /**
@@ -184,17 +218,26 @@ export function getBootstrapBaseUrl(parentWindow, opt_strictForUnitTest) {
  * @return {string}
  */
 function getDefaultBootstrapBaseUrl(parentWindow) {
-  let url =
-      'https://' + getSubDomain(parentWindow) +
-      '.ampproject.net/$internalRuntimeVersion$/frame.html';
-  if (getMode().localDev) {
-    url = 'http://ads.localhost:' +
-        (parentWindow.location.port || parentWindow.parent.location.port) +
-        '/dist.3p/current' +
-        (getMode().minified ? '-min/frame' : '/frame.max') +
-        '.html';
+  if (getMode().localDev || getMode().test) {
+    if (overrideBootstrapBaseUrl) {
+      return overrideBootstrapBaseUrl;
+    }
+    return getAdsLocalhost(parentWindow)
+        + '/dist.3p/'
+        + (getMode().minified ? '$internalRuntimeVersion$/frame'
+            : 'current/frame.max')
+        + '.html';
   }
-  return url;
+  return 'https://' + getSubDomain(parentWindow) +
+      `.${urls.thirdPartyFrameHost}/$internalRuntimeVersion$/frame.html`;
+}
+
+function getAdsLocalhost(win) {
+  if (urls.localDev) {
+    return `http://${urls.thirdPartyFrameHost}`;
+  }
+  return 'http://ads.localhost:'
+      + (win.location.port || win.parent.location.port);
 }
 
 /**
@@ -205,6 +248,15 @@ function getDefaultBootstrapBaseUrl(parentWindow) {
  * @visibleForTesting
  */
 export function getSubDomain(win) {
+  return 'd-' + getRandom(win);
+}
+
+/**
+ * Generates a random non-negative integer.
+ * @param {!Window} win
+ * @return {string}
+ */
+function getRandom(win) {
   let rand;
   if (win.crypto && win.crypto.getRandomValues) {
     // By default use 2 32 bit integers.
@@ -215,7 +267,7 @@ export function getSubDomain(win) {
     // Fall back to Math.random.
     rand = String(win.Math.random()).substr(2) + '0';
   }
-  return 'd-' + rand;
+  return rand;
 }
 
 /**
@@ -232,18 +284,42 @@ function getCustomBootstrapBaseUrl(parentWindow, opt_strictForUnitTest) {
     return null;
   }
   const url = assertHttpsUrl(meta.getAttribute('content'), meta);
-  user.assert(url.indexOf('?') == -1,
+  user().assert(url.indexOf('?') == -1,
       '3p iframe url must not include query string %s in element %s.',
       url, meta);
   // This is not a security primitive, we just don't want this to happen in
   // practice. People could still redirect to the same origin, but they cannot
   // redirect to the proxy origin which is the important one.
   const parsed = parseUrl(url);
-  user.assert((parsed.hostname == 'localhost' && !opt_strictForUnitTest) ||
+  user().assert((parsed.hostname == 'localhost' && !opt_strictForUnitTest) ||
       parsed.origin != parseUrl(parentWindow.location.href).origin,
       '3p iframe url must not be on the same origin as the current doc' +
       'ument %s (%s) in element %s. See https://github.com/ampproject/amphtml' +
       '/blob/master/spec/amp-iframe-origin-policy.md for details.', url,
-      parseUrl(url).origin, meta);
+      parsed.origin, meta);
   return url + '?$internalRuntimeVersion$';
+}
+
+/**
+ * Returns a randomized sentinel value for 3p iframes.
+ * The format is "%d-%d" with the first value being the depth of current
+ * window in the window hierarchy and the second a random integer.
+ * @param {!Window} parentWindow
+ * @return {string}
+ * @visibleForTesting
+ */
+export function generateSentinel(parentWindow) {
+  let windowDepth = 0;
+  for (let win = parentWindow; win && win != win.parent; win = win.parent) {
+    windowDepth++;
+  }
+  return String(windowDepth) + '-' + getRandom(parentWindow);
+}
+
+/**
+ * Resets the count of each 3p frame type
+ * @visibleForTesting
+ */
+export function resetCountForTesting() {
+  count = {};
 }

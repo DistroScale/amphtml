@@ -14,8 +14,11 @@
  * limitations under the License.
  */
 
-import {createIframePromise} from '../../../../testing/iframe';
-require('../amp-brightcove');
+import {
+  createIframePromise,
+  doNotLoadExternalResourcesInTest,
+} from '../../../../testing/iframe';
+import '../amp-brightcove';
 import {adopt} from '../../../../src/runtime';
 import {parseUrl} from '../../../../src/url';
 
@@ -25,6 +28,7 @@ describe('amp-brightcove', () => {
 
   function getBrightcove(attributes, opt_responsive) {
     return createIframePromise(true).then(iframe => {
+      doNotLoadExternalResourcesInTest(iframe.win);
       const bc = iframe.doc.createElement('amp-brightcove');
       for (const key in attributes) {
         bc.setAttribute(key, attributes[key]);
@@ -34,9 +38,7 @@ describe('amp-brightcove', () => {
       if (opt_responsive) {
         bc.setAttribute('layout', 'responsive');
       }
-      iframe.doc.body.appendChild(bc);
-      bc.implementation_.layoutCallback();
-      return bc;
+      return iframe.addElement(bc);
     });
   }
 
@@ -50,8 +52,6 @@ describe('amp-brightcove', () => {
       expect(iframe.tagName).to.equal('IFRAME');
       expect(iframe.src).to.equal(
           'https://players.brightcove.net/906043040001/default_default/index.html?videoId=ref:ampdemo');
-      expect(iframe.getAttribute('width')).to.equal('111');
-      expect(iframe.getAttribute('height')).to.equal('222');
     });
   });
 

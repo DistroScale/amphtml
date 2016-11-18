@@ -14,161 +14,83 @@
  * limitations under the License.
  */
 
-import {addParamsToUrl} from '../../../src/url';
-import {documentInfoFor} from '../../../src/document-info';
-import {elementByTag} from '../../../src/dom';
+import {addParamsToUrl, parseUrl} from '../../../src/url';
+import {getDataParamsFromAttributes} from '../../../src/dom';
 import {getSocialConfig} from './amp-social-share-config';
-import {isExperimentOn} from '../../../src/experiments';
-import {isLayoutSizeDefined, getLengthNumeral,
-  Layout} from '../../../src/layout';
-import {user} from '../../../src/log';
+import {isLayoutSizeDefined} from '../../../src/layout';
+import {dev, user} from '../../../src/log';
+import {openWindowDialog} from '../../../src/dom';
+import {urlReplacementsForDoc} from '../../../src/url-replacements';
 import {CSS} from '../../../build/amp-social-share-0.1.css';
+import {platformFor} from '../../../src/platform';
 
-/** @const */
-const EXPERIMENT = 'amp-social-share';
-
-/** @const */
-const TAG = 'AmpSocialShare';
-
-/** @const {number} */
-const DEFAULT_WIDTH = 60;
-
-/** @const {string} */
-const CLASSNAME_PREFIX = 'amp-social-share-';
 
 class AmpSocialShare extends AMP.BaseElement {
 
+  /** @param {!AmpElement} element */
+  constructor(element) {
+    super(element);
+    /** @private {?string} */
+    this.shareEndpoint_ = null;
+
+    /** @private {!Object} */
+    this.params_ = {};
+
+    /** @private {?../../../src/service/platform-impl.Platform} */
+    this.platform_ = null;
+
+    /** @private {?string} */
+    this.href_ = null;
+
+    /** @private {?string} */
+    this.target_ = null;
+  }
+
   /** @override */
-  isLayoutSupported(layout) {
-    return layout == Layout.FIXED;
+  isLayoutSupported() {
+    return true;
   }
 
   /** @override */
   buildCallback() {
-    this.isExperimentOn_ = isExperimentOn(this.getWin(), EXPERIMENT);
-    if (!this.isExperimentOn_) {
-      user.warn(TAG, `Experiment ${EXPERIMENT} disabled`);
-      return;
-    }
-
-    /** @private @const {!Element} */
-    this.type_ = user.assert(this.element.getAttribute('type'),
-        'The type attribute is required. %s',
+    const typeAttr = user().assert(this.element.getAttribute('type'),
+        'The type attribute is required. %s', this.element);
+    user().assert(!/\s/.test(typeAttr),
+        'Space characters are not allowed in type attribute value. %s',
         this.element);
+    const typeConfig = getSocialConfig(typeAttr) || {};
+    this.shareEndpoint_ = user().assert(
+        this.element.getAttribute('data-share-endpoint') ||
+        typeConfig.shareEndpoint,
+        'The data-share-endpoint attribute is required. %s', this.element);
+    this.params_ = Object.assign({}, typeConfig.defaultParams,
+        getDataParamsFromAttributes(this.element));
+    this.platform_ = platformFor(this.win);
 
-    /** @private @const {!Object} */
-    this.typeConfig_ = getSocialConfig(this.type_);
+    const hrefWithVars = addParamsToUrl(this.shareEndpoint_, this.params_);
+    const urlReplacements = urlReplacementsForDoc(this.getAmpDoc());
+    urlReplacements.expandAsync(hrefWithVars).then(href => {
+      this.href_ = href;
+      // mailto: protocol breaks when opened in _blank on iOS Safari.
+      const isMailTo = /^mailto:$/.test(parseUrl(href).protocol);
+      const isIosSafari = this.platform_.isIos() && this.platform_.isSafari();
+      this.target_ = (isIosSafari && isMailTo) ? '_top' : '_blank';
+    });
 
-    /** @private @const {!Object} */
-    this.config_ = this.getElementConfig_();
-
-    /** @private @const {number} */
-    this.width_ = getLengthNumeral(this.element.getAttribute('width'))
-        || DEFAULT_WIDTH;
-
-    /** @private @const {number} */
-    this.height_ = getLengthNumeral(this.element.getAttribute('height'));
-
-    this.renderShare_();
+    this.element.setAttribute('role', 'link');
+    this.element.addEventListener('click', () => this.handleClick_());
+    this.element.classList.add(`amp-social-share-${typeAttr}`);
   }
 
-  /**
-   * Renders the share based on the element config.
-   * @return {!Element}
-   */
-  renderShare_() {
-    const urlParams = {};
-
-    for (const param in this.typeConfig_['params']) {
-      const paramConf = this.typeConfig_['params'][param];
-      let paramValue = this.config_[param] || this.getDefaultValue_(
-          param, this.config_);
-      user.assert(!paramConf['required'] || paramValue !== null,
-          param + ' is a required attribute for ' + this.type_ + '. %s',
-        this.element);
-      if (paramValue == null && paramConf['type'] == 'fixed') {
-        paramValue = paramConf['value'];
-      }
-      if ('maxlength' in paramConf) {
-        const maxlength = paramConf['maxlength'];
-        user.assert(!paramValue || paramValue.length < maxlength,
-            param + ' cannot exceed ' + maxlength + '. %s', this.element);
-      }
-      if (paramValue != null) {
-        urlParams[paramConf['param']] = paramValue;
-      }
-    }
-
-    // Get the anchor or create one.
-    let link = elementByTag(this.element, 'a');
-    if (link == null) {
-      link = this.getWin().document.createElement('a');
-      link.textContent = this.typeConfig_['text'];
-      link.setAttribute('target', '_blank');
-
-      // Get the container or create one.
-      let container = elementByTag(this.element, 'span');
-      if (container == null) {
-        container = this.getWin().document.createElement('span');
-        container.classList.add(CLASSNAME_PREFIX + this.type_);
-
-        // Only add the container to the element if it didn't exist
-        this.element.appendChild(container);
-      }
-      container.appendChild(link);
-    }
-
-    // Set share url.
-    link.setAttribute('href',
-      addParamsToUrl(this.typeConfig_['url'], urlParams));
+  /** @private */
+  handleClick_() {
+    user().assert(this.href_ && this.target_, 'Clicked before href is set.');
+    const windowFeatures = 'resizable,scrollbars,width=640,height=480';
+    const href = dev().assertString(this.href_);
+    const target = dev().assertString(this.target_);
+    openWindowDialog(this.win, href, target, windowFeatures);
   }
 
-  /**
-   * Gets the configuration for the current social element
-   * @param {!element} element
-   * @return {?Object}
-   */
-  getElementConfig_() {
-    const script = elementByTag(this.element, 'script');
-    let config = {};
-    if (script) {
-      // Get config from script
-      try {
-        config = JSON.parse(script.textContent);
-      } catch (e) {
-        user.error(TAG, 'Malformed JSON configuration. %s', this.element);
-      }
-    } else {
-      // Get config from attributes
-      for (const param in this.typeConfig_['params']) {
-        if (this.element.hasAttribute('data-' + param)) {
-          config[param] = this.element.getAttribute('data-' + param);
-        }
-      }
-    }
-    return config;
-  }
-
-  /**
-   * Gets the default value for a given param, if there is one.
-   * Otherwise it returns null
-   * @param  {!string} param
-   * @param  {!Object} config
-   * @return {*}
-   */
-  getDefaultValue_(param, config) {
-    if (param in config) {
-      return config[param];
-    }
-    switch (param) {
-      case 'url':
-        const info = documentInfoFor(this.getWin());
-        return info.canonicalUrl;
-      case 'text':
-        return '';
-    }
-    return null;
-  }
 };
 
 AMP.registerElement('amp-social-share', AmpSocialShare, CSS);

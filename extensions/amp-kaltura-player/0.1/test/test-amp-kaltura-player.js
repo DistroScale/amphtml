@@ -13,11 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-import {createIframePromise} from '../../../../testing/iframe';
-require('../amp-kaltura-player');
+import {
+  createIframePromise,
+  doNotLoadExternalResourcesInTest,
+} from '../../../../testing/iframe';
+import '../amp-kaltura-player';
 import {adopt} from '../../../../src/runtime';
-import {parseUrl} from '../../../../src/url';
 
 adopt(window);
 
@@ -25,6 +26,7 @@ describe('amp-kaltura-player', () => {
 
   function getKaltura(attributes, opt_responsive) {
     return createIframePromise().then(iframe => {
+      doNotLoadExternalResourcesInTest(iframe.win);
       const kalturaPlayer = iframe.doc.createElement('amp-kaltura-player');
       for (const key in attributes) {
         kalturaPlayer.setAttribute(key, attributes[key]);
@@ -34,9 +36,7 @@ describe('amp-kaltura-player', () => {
       if (opt_responsive) {
         kalturaPlayer.setAttribute('layout', 'responsive');
       }
-      iframe.doc.body.appendChild(kalturaPlayer);
-      kalturaPlayer.implementation_.layoutCallback();
-      return kalturaPlayer;
+      return iframe.addElement(kalturaPlayer);
     });
   }
 
@@ -51,8 +51,6 @@ describe('amp-kaltura-player', () => {
       expect(iframe.tagName).to.equal('IFRAME');
       expect(iframe.src).to.equal(
                 'https://cdnapisec.kaltura.com/p/1281471/sp/128147100/embedIframeJs/uiconf_id/33502051/partner_id/1281471?iframeembed=true&playerId=kaltura_player_amp&entry_id=1_3ts1ms9c');
-      expect(iframe.getAttribute('width')).to.equal('111');
-      expect(iframe.getAttribute('height')).to.equal('222');
     });
   });
 
@@ -69,12 +67,13 @@ describe('amp-kaltura-player', () => {
   });
 
   it('requires data-account', () => {
-    return getKaltura({}).should.eventually.be.rejectedWith(
-            /The data-account attribute is required for/);
+    return getKaltura({}).then(kp => {
+      kp.build();
+    }).should.eventually.be.rejectedWith(
+            /The data-partner attribute is required for/);
   });
 
-    // TODO(erwinm) unskip this when we figure out why it fails on travis
-  it.skip('should pass data-param-* attributes to the iframe src', () => {
+  it('should pass data-param-* attributes to the iframe src', () => {
     return getKaltura({
       'data-partner': '1281471',
       'data-entryid': '1_3ts1ms9c',
@@ -82,8 +81,26 @@ describe('amp-kaltura-player', () => {
       'data-param-my-param': 'hello world',
     }).then(bc => {
       const iframe = bc.querySelector('iframe');
-      const params = parseUrl(iframe.src).search.split('&');
-      expect(params).to.contain('flashvars[myParam]=hello%20world');
+      expect(iframe.src).to.contain('flashvars%5BmyParam%5D=hello%20world');
+    });
+  });
+
+  describe('createPlaceholderCallback', () => {
+    it('should create a placeholder image', () => {
+      return getKaltura({
+        'data-partner': '1281471',
+        'data-entryid': '1_3ts1ms9c',
+        'data-uiconf': '33502051',
+      }).then(kp => {
+        const img = kp.querySelector('amp-img');
+        expect(img).to.not.be.null;
+        expect(img.getAttribute('src')).to.equal(
+            'https://cdnapisec.kaltura.com/p/1281471/thumbnail/entry_id/' +
+            '1_3ts1ms9c/width/111/height/222');
+        expect(img.getAttribute('layout')).to.equal('fill');
+        expect(img.hasAttribute('placeholder')).to.be.true;
+        expect(img.getAttribute('referrerpolicy')).to.equal('origin');
+      });
     });
   });
 });

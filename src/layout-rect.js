@@ -28,7 +28,7 @@
  *   height: number
  * }}
  */
-let LayoutRectDef;
+export let LayoutRectDef;
 
 
 /**
@@ -42,10 +42,10 @@ let LayoutRectDef;
  */
 export function layoutRectLtwh(left, top, width, height) {
   return {
-    left: left,
-    top: top,
-    width: width,
-    height: height,
+    left,
+    top,
+    width,
+    height,
     bottom: top + height,
     right: left + width,
   };
@@ -55,20 +55,13 @@ export function layoutRectLtwh(left, top, width, height) {
 /**
  * Creates a layout rect based on the DOMRect, e.g. obtained from calling
  * getBoundingClientRect.
- * @param {!DOMRect} rect
+ * @param {!ClientRect} rect
  * @return {!LayoutRectDef}
  */
 export function layoutRectFromDomRect(rect) {
-  return {
-    left: rect.left,
-    top: rect.top,
-    width: rect.width,
-    height: rect.height,
-    bottom: rect.top + rect.height,
-    right: rect.left + rect.width,
-  };
+  return layoutRectLtwh(Number(rect.left), Number(rect.top),
+      Number(rect.width), Number(rect.height));
 }
-
 
 /**
  * Returns true if the specified two rects overlap by a single pixel.
@@ -131,7 +124,8 @@ export function expandLayoutRect(rect, dw, dh) {
  * @return {!LayoutRectDef}
  */
 export function moveLayoutRect(rect, dx, dy) {
-  if (dx == 0 && dy == 0) {
+  if ((dx == 0 && dy == 0) ||
+      (rect.width == 0 && rect.height == 0)) {
     return rect;
   }
   return layoutRectLtwh(rect.left + dx, rect.top + dy,

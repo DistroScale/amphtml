@@ -15,11 +15,12 @@
  */
 
 import {Layout} from './layout';
-import {preconnectFor} from './preconnect';
-import {resourcesFor} from './resources';
-import {viewerFor} from './viewer';
-import {viewportFor} from './viewport';
+import {loadPromise} from './event-helper';
+import {preconnectForElement} from './preconnect';
+import {isArray} from './types';
+import {viewportForDoc} from './viewport';
 import {vsyncFor} from './vsync';
+import {user} from './log';
 
 
 /**
@@ -50,15 +51,12 @@ import {vsyncFor} from './vsync';
  *           || firstAttachedCallback
  *           ||
  *           \/
- *    State: <NOT BUILT>             <=
- *           ||                       ||
- *           || isReadyToBuild?  ======
- *           ||
- *           \/
  *    State: <NOT BUILT>
  *           ||
  *           || buildCallback
- *           || preconnectCallback may be called N times after this.
+ *           || !getPlaceholder() => createPlaceholderCallback
+ *           || preconnectCallback may be called N times after this, but only
+ *           || after the doc becomes visible.
  *           || pauseCallback may be called N times after this.
  *           || resumeCallback may be called N times after this.
  *           ||
@@ -95,6 +93,11 @@ import {vsyncFor} from './vsync';
  * again, if user interaction is not required.
  * TODO(jridgewell) slide slides into view
  *
+ * The createPlaceholderCallback is called if AMP didn't detect a provided
+ * placeholder for the element, subclasses can override this to build and
+ * return a dynamically created placeholder that AMP would append to the
+ * element.
+ *
  * The unlayoutCallback is called when the document becomes inactive, e.g.
  * when the user swipes away from the document, or another tab is focused.
  * In these situations, expensive memory and CPU resources should be freed.
@@ -112,8 +115,20 @@ import {vsyncFor} from './vsync';
 export class BaseElement {
   /** @param {!AmpElement} element */
   constructor(element) {
-    /** @public @const */
+    /** @public @const {!Element} */
     this.element = element;
+    /*
+    \   \  /  \  /   / /   \     |   _  \     |  \ |  | |  | |  \ |  |  /  _____|
+     \   \/    \/   / /  ^  \    |  |_)  |    |   \|  | |  | |   \|  | |  |  __
+      \            / /  /_\  \   |      /     |  . `  | |  | |  . `  | |  | |_ |
+       \    /\    / /  _____  \  |  |\  \----.|  |\   | |  | |  |\   | |  |__| |
+        \__/  \__/ /__/     \__\ | _| `._____||__| \__| |__| |__| \__|  \______|
+
+    Any private property for BaseElement should be declared in
+    build-system/amp.extern.js, this is so closure compiler doesn't reuse the
+    same symbol it would use in the core compilation unit for the private
+    property in the extensions compilation unit's private properties.
+     */
 
     /** @package {!Layout} */
     this.layout_ = Layout.NODISPLAY;
@@ -124,14 +139,27 @@ export class BaseElement {
     /** @package {boolean} */
     this.inViewport_ = false;
 
-    /** @private {!Object<string, function(!ActionInvocation)>} */
-    this.actionMap_ = this.getWin().Object.create(null);
+    /** @public @const {!Window} */
+    this.win = element.ownerDocument.defaultView;
 
-    /** @protected {!Preconnect} */
-    this.preconnect = preconnectFor(this.getWin());
+    /** @private {?Object<string, function(!./service/action-impl.ActionInvocation)>} */
+    this.actionMap_ = null;
 
-    /** @private {!Resources}  */
-    this.resources_ = resourcesFor(this.getWin());
+    /** @public {!./preconnect.Preconnect} */
+    this.preconnect = preconnectForElement(this.element);
+
+    /** @public {?Object} For use by sub classes */
+    this.config = null;
+  }
+
+  /**
+  * This is the priority of loading elements (layoutCallback).
+  * The lower the number, the higher the priority.
+  * The default priority for base elements is 0.
+  * @return {number}
+  */
+  getPriority() {
+    return 0;
   }
 
   /** @return {!Layout} */
@@ -139,14 +167,34 @@ export class BaseElement {
     return this.layout_;
   }
 
-  /** @protected @return {!Window} */
-  getWin() {
-    return this.element.ownerDocument.defaultView;
+  /**
+   * Returns a previously measured layout box of the element.
+   * @return {!./layout-rect.LayoutRectDef}
+   */
+  getLayoutBox() {
+    return this.element.getLayoutBox();
   }
 
-  /** @protected @return {!Vsync} */
+  /**
+   * DO NOT CALL. Retained for backward compat during rollout.
+   * @public @return {!Window}
+   */
+  getWin() {
+    return this.win;
+  }
+
+  /**
+   * Returns the associated ampdoc. Only available when `buildCallback` and
+   * going forward. It throws an exception before `buildCallback`.
+   * @return {!./service/ampdoc-impl.AmpDoc}
+   */
+  getAmpDoc() {
+    return this.element.getAmpDoc();
+  }
+
+  /** @public @return {!./service/vsync-impl.Vsync} */
   getVsync() {
-    return vsyncFor(this.getWin());
+    return vsyncFor(this.win);
   }
 
   /**
@@ -154,7 +202,7 @@ export class BaseElement {
    * layout is not yet known. A `0` value indicates that the element is not
    * visible.
    * @return {number}
-   * @protected
+   * @public
    */
   getLayoutWidth() {
     return this.layoutWidth_;
@@ -166,10 +214,20 @@ export class BaseElement {
    * supported.
    * @param {!Layout} layout
    * @return {boolean}
-   * @protected
+   * @public
    */
   isLayoutSupported(layout) {
     return layout == Layout.NODISPLAY;
+  }
+
+  /**
+   * Intended to be implemented by subclasses. Tests whether the element
+   * requires fixed positioning.
+   * @return {boolean}
+   * @public
+   */
+  isAlwaysFixed() {
+    return false;
   }
 
   /**
@@ -177,6 +235,24 @@ export class BaseElement {
    */
   isInViewport() {
     return this.inViewport_;
+  }
+
+  /**
+   * This method is called when the element is added to DOM for the first time
+   * and before `buildCallback` to give the element a chance to redirect its
+   * implementation to another `BaseElement` implementation. The returned
+   * value can be either `null` or `undefined` to indicate that no redirection
+   * will take place; `BaseElement` instance to upgrade immediately; or a
+   * promise to upgrade with the resolved `BaseElement` instance.
+   *
+   * Notice that calls to `upgradeCallback` are not recursive. I.e. this
+   * callback will not be called on the returned instance again.
+   *
+   * @return {!BaseElement|!Promise<!BaseElement>|null}
+   */
+  upgradeCallback() {
+    // Subclasses may override.
+    return null;
   }
 
   /**
@@ -197,32 +273,13 @@ export class BaseElement {
   }
 
   /**
-   * Override in subclass to indicate if the element is ready to rebuild its
-   * DOM subtree.  If the element can proceed with building the content return
-   * "true" and return "false" otherwise. The element may not be ready to build
-   * e.g. because its children are not available yet.
-   *
-   * See {@link buildCallback} for more details.
-   *
-   * @return {boolean}
-   */
-  isReadyToBuild() {
-    // Subclasses may override.
-    return true;
-  }
-
-  /**
    * Override in subclass if the element needs to rebuilt its DOM content.
    * Until the element has been rebuilt its content are not shown with an only
    * exception of [placeholder] elements. From the moment the element is created
    * and until the building phase is complete it will have "amp-notbuilt" CSS
    * class set on it.
    *
-   * This callback is executed early after the element has been attached to DOM
-   * if "isReadyToBuild" callback returns "true" or its called later upon the
-   * determination of Resources manager but definitely before first
-   * "layoutCallback" is called. Notice that "isReadyToBuild" call is not
-   * consulted in the later case.
+   * This callback is executed early after the element has been attached to DOM.
    */
   buildCallback() {
     // Subclasses may override.
@@ -232,8 +289,17 @@ export class BaseElement {
    * Called by the framework to give the element a chance to preconnect to
    * hosts and prefetch resources it is likely to need. May be called
    * multiple times because connections can time out.
+   * @param {boolean=} opt_onLayout
    */
-  preconnectCallback() {
+  preconnectCallback(opt_onLayout) {
+    // Subclasses may override.
+  }
+
+  /**
+   * Override in subclass to adjust the element when it is being removed from
+   * the DOM. Could e.g. be used to remove a listener.
+   */
+  detachedCallback() {
     // Subclasses may override.
   }
 
@@ -246,7 +312,7 @@ export class BaseElement {
    * @param {!Element} element
    */
   setAsOwner(element) {
-    this.resources_.setOwner(element, this.element);
+    this.element.getResources().setOwner(element, this.element);
   }
 
   /**
@@ -259,12 +325,26 @@ export class BaseElement {
   }
 
   /**
+   * Subclasses can override this method to create a dynamic placeholder
+   * element and return it to be appended to the element. This will only
+   * be called if the element doesn't already have a placeholder.
+   * @returns {?Element}
+   */
+  createPlaceholderCallback() {
+    return null;
+  }
+
+  /**
    * Subclasses can override this method to opt-out of rendering the element
    * when it is not currently visible.
-   * @return {boolean}
+   * Returning a boolean allows or prevents rendering outside the viewport at
+   * any distance, while returning a positive number allows rendering only when
+   * the element is within X viewports of the current viewport. Returning a
+   * zero causes the element to only render inside the viewport.
+   * @return {boolean|number}
    */
   renderOutsideViewport() {
-    return true;
+    return 3;
   }
 
   /**
@@ -300,7 +380,7 @@ export class BaseElement {
    * The default behavior of this method is to hide the placeholder. However,
    * a subclass may choose to hide placeholder earlier or not hide it at all.
    *
-   * @protected
+   * @public
    */
   firstLayoutCompleted() {
     this.togglePlaceholder(false);
@@ -354,18 +434,39 @@ export class BaseElement {
   /**
    * Instructs the element that its activation is requested based on some
    * user event. Intended to be implemented by actual components.
-   * @param {!ActionInvocation} unusedInvocation
+   * @param {!./service/action-impl.ActionInvocation} unusedInvocation
    */
   activate(unusedInvocation) {
   }
 
   /**
+   * Returns a promise that will resolve or fail based on the element's 'load'
+   * and 'error' events. Optionally this method takes a timeout, which will reject
+   * the promise if the resource has not loaded by then.
+   * @param {T} element
+   * @param {number=} opt_timeout
+   * @return {!Promise<T>}
+   * @template T
+   * @final
+   */
+  loadPromise(element, opt_timeout) {
+    return loadPromise(element, opt_timeout);
+  }
+
+  initActionMap_() {
+    if (!this.actionMap_) {
+      this.actionMap_ = this.win.Object.create(null);
+    }
+  }
+
+  /**
    * Registers the action handler for the method with the specified name.
    * @param {string} method
-   * @param {function(!ActionInvocation)} handler
-   * @protected
+   * @param {function(!./service/action-impl.ActionInvocation)} handler
+   * @public
    */
   registerAction(method, handler) {
+    this.initActionMap_();
     this.actionMap_[method] = handler;
   }
 
@@ -373,7 +474,7 @@ export class BaseElement {
    * Requests the element to execute the specified method. If method must have
    * been previously registered using {@link registerAction}, otherwise an
    * error is thrown.
-   * @param {!ActionInvocation} invocation The invocation data.
+   * @param {!./service/action-impl.ActionInvocation} invocation The invocation data.
    * @param {boolean} unusedDeferred Whether the invocation has had to wait any time
    *   for the element to be resolved, upgraded and built.
    * @final
@@ -383,10 +484,10 @@ export class BaseElement {
     if (invocation.method == 'activate') {
       this.activate(invocation);
     } else {
+      this.initActionMap_();
       const handler = this.actionMap_[invocation.method];
-      if (!handler) {
-        throw new Error(`Method not found: ${invocation.method}`);
-      }
+      user().assert(handler, `Method not found: ${invocation.method} in %s`,
+          this);
       handler(invocation);
     }
   }
@@ -396,7 +497,7 @@ export class BaseElement {
    * @return {number}
    */
   getMaxDpr() {
-    return this.resources_.getMaxDpr();
+    return this.element.getResources().getMaxDpr();
   }
 
   /**
@@ -404,17 +505,18 @@ export class BaseElement {
    * @return {number}
    */
   getDpr() {
-    return this.resources_.getDpr();
+    return this.element.getResources().getDpr();
   }
 
   /**
    * Utility method that propagates attributes from this element
    * to the given element.
-   * @param  {!Array<string>} attributes
+   * @param  {string|!Array<string>} attributes
    * @param  {!Element} element
-   * @protected @final
+   * @public @final
    */
   propagateAttributes(attributes, element) {
+    attributes = isArray(attributes) ? attributes : [attributes];
     for (let i = 0; i < attributes.length; i++) {
       const attr = attributes[i];
       if (!this.element.hasAttribute(attr)) {
@@ -425,9 +527,25 @@ export class BaseElement {
   }
 
   /**
+   * Utility method that forwards the given list of non-bubbling events
+   * from the given element to this element as custom events with the same name.
+   * @param  {string|!Array<string>} events
+   * @param  {!Element} element
+   * @public @final
+   */
+  forwardEvents(events, element) {
+    events = isArray(events) ? events : [events];
+    for (let i = 0; i < events.length; i++) {
+      element.addEventListener(events[i], event => {
+        this.element.dispatchCustomEvent(events[i], event.data || {});
+      });
+    }
+  }
+
+  /**
    * Returns an optional placeholder element for this custom element.
    * @return {?Element}
-   * @protected @final
+   * @public @final
    */
   getPlaceholder() {
     return this.element.getPlaceholder();
@@ -436,7 +554,7 @@ export class BaseElement {
   /**
    * Hides or shows the placeholder, if available.
    * @param {boolean} state
-   * @protected @final
+   * @public @final
    */
   togglePlaceholder(state) {
     this.element.togglePlaceholder(state);
@@ -445,7 +563,7 @@ export class BaseElement {
   /**
    * Returns an optional fallback element for this custom element.
    * @return {?Element}
-   * @protected @final
+   * @public @final
    */
   getFallback() {
     return this.element.getFallback();
@@ -455,7 +573,7 @@ export class BaseElement {
    * Hides or shows the fallback, if available. This function must only
    * be called inside a mutate context.
    * @param {boolean} state
-   * @protected @final
+   * @public @final
    */
   toggleFallback(state) {
     this.element.toggleFallback(state);
@@ -464,7 +582,7 @@ export class BaseElement {
   /**
    * Returns an optional overflow element for this custom element.
    * @return {?Element}
-   * @protected @final
+   * @public @final
    */
   getOverflowElement() {
     return this.element.getOverflowElement();
@@ -475,7 +593,7 @@ export class BaseElement {
    * that could have been added for markup. These nodes can include Text,
    * Comment and other child nodes.
    * @return {!Array<!Node>}
-   * @protected @final
+   * @public @final
    */
   getRealChildNodes() {
     return this.element.getRealChildNodes();
@@ -485,7 +603,7 @@ export class BaseElement {
    * Returns the original children of the custom element without any service
    * nodes that could have been added for markup.
    * @return {!Array<!Element>}
-   * @protected @final
+   * @public @final
    */
   getRealChildren() {
     return this.element.getRealChildren();
@@ -501,7 +619,7 @@ export class BaseElement {
    *
    * @param {!Element} element
    * @param {boolean=} opt_replacedContent
-   * @protected @final
+   * @public @final
    */
   applyFillContent(element, opt_replacedContent) {
     element.classList.add('-amp-fill-content');
@@ -512,18 +630,19 @@ export class BaseElement {
 
   /**
    * Returns the viewport within which the element operates.
-   * @return {!Viewport}
+   * @return {!./service/viewport-impl.Viewport}
    */
   getViewport() {
-    return viewportFor(this.getWin());
+    return viewportForDoc(this.getAmpDoc());
   }
 
- /**
-  * Returns a previously measured layout box of the element.
-  * @return {!LayoutRect}
-  */
+  /**
+   * Returns the layout rectangle of the element used for reporting this
+   * element's intersection with the viewport.
+   * @return {!./layout-rect.LayoutRectDef}
+   */
   getIntersectionElementLayoutBox() {
-    return this.resources_.getResourceForElement(this.element).getLayoutBox();
+    return this.getLayoutBox();
   }
 
   /**
@@ -531,18 +650,26 @@ export class BaseElement {
    * specified. Resource manager will perform the actual layout based on the
    * priority of this element and its children.
    * @param {!Element|!Array<!Element>} elements
-   * @protected
+   * @public
    */
   scheduleLayout(elements) {
-    this.resources_.scheduleLayout(this.element, elements);
+    this.element.getResources().scheduleLayout(this.element, elements);
   }
 
   /**
    * @param {!Element|!Array<!Element>} elements
-   * @protected
+   * @public
    */
   schedulePause(elements) {
-    this.resources_.schedulePause(this.element, elements);
+    this.element.getResources().schedulePause(this.element, elements);
+  }
+
+  /**
+   * @param {!Element|!Array<!Element>} elements
+   * @public
+   */
+  scheduleResume(elements) {
+    this.element.getResources().scheduleResume(this.element, elements);
   }
 
   /**
@@ -550,11 +677,18 @@ export class BaseElement {
    * specified. Resource manager will perform the actual preload based on the
    * priority of this element and its children.
    * @param {!Element|!Array<!Element>} elements
-   * @param {boolean} inLocalViewport
-   * @protected
+   * @public
    */
   schedulePreload(elements) {
-    this.resources_.schedulePreload(this.element, elements);
+    this.element.getResources().schedulePreload(this.element, elements);
+  }
+
+  /**
+   * @param {!Element|!Array<!Element>} elements
+   * @public
+   */
+  scheduleUnlayout(elements) {
+    this.element.getResources()./*OK*/scheduleUnlayout(this.element, elements);
   }
 
   /**
@@ -563,62 +697,63 @@ export class BaseElement {
    * based on the state of these elements and their parent subtree.
    * @param {!Element|!Array<!Element>} elements
    * @param {boolean} inLocalViewport
-   * @protected
+   * @public
    */
   updateInViewport(elements, inLocalViewport) {
-    this.resources_.updateInViewport(this.element, elements, inLocalViewport);
+    this.element.getResources().updateInViewport(
+        this.element, elements, inLocalViewport);
   }
 
   /**
    * Requests the runtime to update the height of this element to the specified
    * value. The runtime will schedule this request and attempt to process it
    * as soon as possible.
-   * When the height is successfully updated then the opt_callback is called.
    * @param {number} newHeight
-   * @param {function=} opt_callback A callback function.
-   * @protected
+   * @public
    */
-  changeHeight(newHeight, opt_callback) {
-    this.resources_./*OK*/changeSize(
-        this.element, newHeight, /* newWidth */ undefined, opt_callback);
+  changeHeight(newHeight) {
+    this.element.getResources()./*OK*/changeSize(
+        this.element, newHeight, /* newWidth */ undefined);
   }
 
   /**
-   * Requests the runtime to update the height of this element to the specified
-   * value. The runtime will schedule this request and attempt to process it
+   * Return a promise that requests the runtime to update
+   * the height of this element to the specified value.
+   * The runtime will schedule this request and attempt to process it
    * as soon as possible. However, unlike in {@link changeHeight}, the runtime
    * may refuse to make a change in which case it will show the element's
    * overflow element if provided, which is supposed to provide the reader with
    * the necessary user action. (The overflow element is shown only if the
    * requested height is greater than 0.)
-   * If the height is successfully updated then the opt_callback is called.
+   * The promise is resolved if the height is successfully updated.
    * @param {number} newHeight
-   * @param {function=} opt_callback A callback function.
-   * @protected
+   * @return {!Promise}
+   * @public
    */
-  attemptChangeHeight(newHeight, opt_callback) {
-    this.resources_.attemptChangeSize(
-        this.element, newHeight, /* newWidth */ undefined, opt_callback);
+  attemptChangeHeight(newHeight) {
+    return this.element.getResources().attemptChangeSize(
+        this.element, newHeight, /* newWidth */ undefined);
   }
 
  /**
-  * Requests the runtime to update the size of this element to the specified
-  * values. The runtime will schedule this request and attempt to process it
+  * Return a promise that requests the runtime to update
+  * the size of this element to the specified value.
+  * The runtime will schedule this request and attempt to process it
   * as soon as possible. However, unlike in {@link changeSize}, the runtime
   * may refuse to make a change in which case it will show the element's
   * overflow element if provided, which is supposed to provide the reader with
   * the necessary user action. (The overflow element is shown only if the
   * requested height is greater than 0.)
-  * If the height is successfully updated then the opt_callback is called.
+  * The promise is resolved if the height is successfully updated.
   * @param {number|undefined} newHeight
   * @param {number|undefined} newWidth
-  * @param {function=} opt_callback A callback function.
-  * @protected
+  * @return {!Promise}
+  * @public
   */
- attemptChangeSize(newHeight, newWidth, opt_callback) {
-   this.resources_.attemptChangeSize(
-       this.element, newHeight, newWidth, opt_callback);
- }
+  attemptChangeSize(newHeight, newWidth) {
+    return this.element.getResources().attemptChangeSize(
+        this.element, newHeight, newWidth);
+  }
 
  /**
   * Runs the specified mutation on the element and ensures that measures
@@ -635,7 +770,8 @@ export class BaseElement {
   * @return {!Promise}
   */
   mutateElement(mutator, opt_element) {
-    this.resources_.mutateElement(opt_element || this.element, mutator);
+    return this.element.getResources().mutateElement(
+        opt_element || this.element, mutator);
   }
 
   /**
@@ -644,23 +780,25 @@ export class BaseElement {
    * @param {!Function} callback
    */
   deferMutate(callback) {
-    this.resources_.deferMutate(this.element, callback);
+    this.element.getResources().deferMutate(this.element, callback);
   }
 
   /**
-   * Requests full overlay mode from the viewer.
-   * @protected
+   * Collapses the element, setting it to `display: none`, and notifies its
+   * owner (if there is one) through {@link collapsedCallback} that the element
+   * is no longer visible.
    */
-  requestFullOverlay() {
-    viewerFor(this.getWin()).requestFullOverlay();
+  collapse() {
+    this.element.getResources().collapseElement(this.element);
   }
 
   /**
-   * Requests to cancel full overlay mode from the viewer.
-   * @protected
+   * Called every time an owned AmpElement collapses itself.
+   * See {@link collapse}.
+   * @param {!AmpElement} unusedElement
    */
-  cancelFullOverlay() {
-    viewerFor(this.getWin()).cancelFullOverlay();
+  collapsedCallback(unusedElement) {
+    // Subclasses may override.
   }
 
   /**
@@ -668,18 +806,7 @@ export class BaseElement {
    * more expensive style reads should now be cheap.
    * This may currently not work with extended elements. Please file
    * an issue if that is required.
-   * @protected
+   * @public
    */
   onLayoutMeasure() {}
-
-  /**
-   * Called after a overflowCallback is triggered on an element.
-   * @param {boolean} unusedOverflown
-   * @param {number|undefined} unusedRequestedHeight
-   * @param {number|undefined} unusedRequestedWidth
-   */
-  overflowCallback(
-      unusedOverflown,
-      unusedRequestedHeight,
-      unusedRequestedWidth) {}
 };

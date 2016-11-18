@@ -14,8 +14,11 @@
  * limitations under the License.
  */
 
-import {createIframePromise} from '../../../../testing/iframe';
-require('../amp-vimeo');
+import {
+  createIframePromise,
+  doNotLoadExternalResourcesInTest,
+} from '../../../../testing/iframe';
+import '../amp-vimeo';
 import {adopt} from '../../../../src/runtime';
 
 adopt(window);
@@ -24,6 +27,7 @@ describe('amp-vimeo', () => {
 
   function getVimeo(videoId, opt_responsive) {
     return createIframePromise().then(iframe => {
+      doNotLoadExternalResourcesInTest(iframe.win);
       const vimeo = iframe.doc.createElement('amp-vimeo');
       vimeo.setAttribute('data-videoid', videoId);
       vimeo.setAttribute('width', '111');
@@ -31,9 +35,7 @@ describe('amp-vimeo', () => {
       if (opt_responsive) {
         vimeo.setAttribute('layout', 'responsive');
       }
-      iframe.doc.body.appendChild(vimeo);
-      vimeo.implementation_.layoutCallback();
-      return vimeo;
+      return iframe.addElement(vimeo);
     });
   }
 
@@ -44,8 +46,6 @@ describe('amp-vimeo', () => {
       expect(iframe.tagName).to.equal('IFRAME');
       expect(iframe.src).to.equal(
           'https://player.vimeo.com/video/123');
-      expect(iframe.getAttribute('width')).to.equal('111');
-      expect(iframe.getAttribute('height')).to.equal('222');
     });
   });
 

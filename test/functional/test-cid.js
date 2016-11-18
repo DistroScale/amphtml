@@ -18,28 +18,44 @@ import {cidFor} from '../../src/cid';
 import {
   installCidService,
   getProxySourceOrigin,
-} from '../../src/service/cid-impl';
+} from '../../extensions/amp-analytics/0.1/cid-impl';
+import {installCryptoService, Crypto,}
+    from '../../extensions/amp-analytics/0.1/crypto-impl';
+import {installDocService} from '../../src/service/ampdoc-impl';
 import {parseUrl} from '../../src/url';
-import {timer} from '../../src/timer';
-import {installViewerService} from '../../src/service/viewer-impl';
+import {timerFor} from '../../src/timer';
+import {installPlatformService} from '../../src/service/platform-impl';
+import {installViewerServiceForDoc} from '../../src/service/viewer-impl';
+import {installTimerService} from '../../src/service/timer-impl';
 import * as sinon from 'sinon';
+
+const DAY = 24 * 3600 * 1000;
 
 describe('cid', () => {
 
-  let isEmbedded;
+  let isIframed;
   let sandbox;
   let clock;
   let fakeWin;
+  let ampdoc;
   let storage;
+  let viewerStorage;
+  let cid;
+  let crypto;
+  let viewerBaseCidStub;
+  let whenFirstVisible;
 
   const hasConsent = Promise.resolve();
+  const timer = timerFor(window);
 
   beforeEach(() => {
     let call = 1;
-    isEmbedded = false;
+    isIframed = false;
     sandbox = sinon.sandbox.create();
     clock = sandbox.useFakeTimers();
+    whenFirstVisible = Promise.resolve();
     storage = {};
+    viewerStorage = null;
     fakeWin = {
       localStorage: {
         setItem: (key, value) => {
@@ -63,30 +79,48 @@ describe('cid', () => {
           array[15] = 15;
         },
       },
-      document: {},
+      document: {
+        nodeType: /* DOCUMENT */ 9,
+        body: {},
+      },
+      navigator: window.navigator,
       ampExtendedElements: {
         'amp-analytics': true,
       },
+      setTimeout: window.setTimeout,
     };
-    const viewer = installViewerService(fakeWin);
-    sandbox.stub(viewer, 'isEmbedded', function() {
-      return isEmbedded;
+    fakeWin.document.defaultView = fakeWin;
+    const ampdocService = installDocService(fakeWin, /* isSingleDoc */ true);
+    ampdoc = ampdocService.getAmpDoc();
+    installTimerService(fakeWin);
+    installPlatformService(fakeWin);
+    const viewer = installViewerServiceForDoc(ampdoc);
+    sandbox.stub(viewer, 'isIframed', function() {
+      return isIframed;
     });
-    sandbox.stub(viewer, 'getBaseCid', function() {
-      return Promise.resolve('from-viewer');
+    sandbox.stub(viewer, 'whenFirstVisible', function() {
+      return whenFirstVisible;
     });
-    installCidService(fakeWin);
-    return cidFor(fakeWin).then(c => {
-      cid = c;
-      cid.origSha384Base64_ = cid.sha384Base64_;
-      cid.sha384Base64_ = val => {
-        if (val instanceof Array) {
-          val = '[' + val + ']';
-        }
+    viewerBaseCidStub = sandbox.stub(viewer, 'baseCid', function(opt_data) {
+      if (opt_data) {
+        viewerStorage = opt_data;
+      }
+      return Promise.resolve(viewerStorage || undefined);
+    });
 
-        return 'sha384(' + val + ')';
-      };
-    });
+    return Promise
+        .all([installCidService(fakeWin), installCryptoService(fakeWin)])
+        .then(results => {
+          cid = results[0];
+          crypto = results[1];
+          crypto.sha384Base64 = val => {
+            if (val instanceof Uint8Array) {
+              val = '[' + Array.apply([], val).join(',') + ']';
+            }
+
+            return Promise.resolve('sha384(' + val + ')');
+          };
+        });
   });
 
   afterEach(() => {
@@ -141,7 +175,7 @@ describe('cid', () => {
   });
 
   it('should produce golden value', () => {
-    cid.sha384Base64_ = cid.origSha384Base64_;
+    crypto.sha384Base64 = new Crypto(fakeWin).sha384Base64;
     return compare(
         'e2',
         'q0pPfZTWGruPrtURDJHexzs-MgOkt9SJAsAZodzr8tx8hKv8BS62AVpbttaFX8fK');
@@ -167,31 +201,65 @@ describe('cid', () => {
   it('should pick up the cid value from storage', () => {
     storage['amp-cid'] = JSON.stringify({
       cid: 'YYY',
-      time: timer.now(),
+      time: Date.now(),
     });
     return compare(
         'e2',
         'sha384(YYYhttp://www.origin.come2)');
   });
 
-  it('should retrieve cid from viewer if embedded', () => {
-    isEmbedded = true;
-    return compare(
-        'e2',
-        'sha384(from-viewerhttp://www.origin.come2)');
+  it('should read from viewer storage if embedded', () => {
+    isIframed = true;
+    const expectedBaseCid = 'from-viewer';
+    viewerStorage = JSON.stringify({
+      time: 0,
+      cid: expectedBaseCid,
+    });
+    return Promise.all([
+      compare('e1', `sha384(${expectedBaseCid}http://www.origin.come1)`),
+      compare('e2', `sha384(${expectedBaseCid}http://www.origin.come2)`),
+    ]).then(() => {
+      expect(viewerBaseCidStub).to.be.calledOnce;
+      expect(viewerBaseCidStub).to.not.be.calledWith(sinon.match.string);
+
+      // Ensure it's called only once since we cache it in memory.
+      return compare('e3', `sha384(${expectedBaseCid}http://www.origin.come3)`);
+    }).then(() => {
+      expect(viewerBaseCidStub).to.be.calledOnce;
+      expect(viewerBaseCidStub).to.not.be.calledWith(sinon.match.string);
+      return expect(cid.baseCid_).to.eventually.equal(expectedBaseCid);
+    });
+  });
+
+  it('should store to viewer storage if embedded', () => {
+    isIframed = true;
+    const expectedBaseCid = 'sha384([1,2,3,0,0,0,0,0,0,0,0,0,0,0,0,15])';
+    return compare('e2', `sha384(${expectedBaseCid}http://www.origin.come2)`)
+        .then(() => {
+          expect(viewerBaseCidStub).to.be.calledWith(JSON.stringify({
+            time: 0,
+            cid: expectedBaseCid,
+          }));
+
+          // Ensure it's called only once since we cache it in memory.
+          return compare('e3', `sha384(${expectedBaseCid}http://www.origin.come3)`);
+        })
+        .then(() => {
+          expect(viewerBaseCidStub).to.be.calledWith(sinon.match.string);
+          return expect(cid.baseCid_).to.eventually.equal(expectedBaseCid);
+        });
   });
 
   it('should prefer value in storage if present', () => {
-    isEmbedded = true;
+    isIframed = true;
     storage['amp-cid'] = JSON.stringify({
       cid: 'in-storage',
-      time: timer.now(),
+      time: Date.now(),
     });
     return compare(
         'e2',
         'sha384(in-storagehttp://www.origin.come2)');
   });
-
 
   it('should work without mocking', () => {
     const win = {
@@ -205,8 +273,11 @@ describe('cid', () => {
     };
     win.__proto__ = window;
     expect(win.location.href).to.equal('https://cdn.ampproject.org/v/www.origin.com/');
-    installViewerService(win).isEmbedded = () => false;
+    installTimerService(win);
+    installPlatformService(win);
+    installViewerServiceForDoc(ampdoc).isIframed = () => false;
     installCidService(win);
+    installCryptoService(win);
     return cidFor(win).then(cid => {
       return cid.get('foo', hasConsent).then(c1 => {
         return cid.get('foo', hasConsent).then(c2 => {
@@ -222,7 +293,6 @@ describe('cid', () => {
   });
 
   it('should expire on read after 365 days', () => {
-    const DAY = 24 * 3600 * 1000;
     const expected = 'sha384(sha384([1,2,3,0,0,0,0,0,0,0,0,0,0,0,0,15])http://www.origin.come2)';
     return compare('e2', expected).then(() => {
       clock.tick(364 * DAY);
@@ -240,8 +310,27 @@ describe('cid', () => {
     });
   });
 
+  it('should expire on read after 365 days when embedded', () => {
+    isIframed = true;
+    const expectedBaseCid = 'from-viewer';
+    viewerStorage = JSON.stringify({
+      time: 0,
+      cid: expectedBaseCid,
+    });
+
+    const expectedIdFromViewer = 'sha384(from-viewerhttp://www.origin.come2)';
+    const expectedNewId = 'sha384(sha384([1,2,3,0,0,0,0,0,0,0,0,0,0,0,0,15])http://www.origin.come2)';
+    return compare('e2', expectedIdFromViewer).then(() => {
+      clock.tick(364 * DAY);
+      return compare('e2', expectedIdFromViewer).then(() => {
+        clock.tick(365 * DAY + 1);
+        removeMemoryCacheOfCid();
+        return compare('e2', expectedNewId);
+      });
+    });
+  });
+
   it('should set last access time once a day', () => {
-    const DAY = 24 * 3600 * 1000;
     const expected = 'sha384(sha384([1,2,3,0,0,0,0,0,0,0,0,0,0,0,0,15])http://www.origin.come2)';
     function getStoredTime() {
       return JSON.parse(storage['amp-cid']).time;
@@ -260,6 +349,40 @@ describe('cid', () => {
         });
       });
     });
+  });
+
+  it('should set last access time once a day when embedded', () => {
+    isIframed = true;
+    const expected = 'sha384(sha384([1,2,3,0,0,0,0,0,0,0,0,0,0,0,0,15])http://www.origin.come2)';
+    function getStoredTime() {
+      return JSON.parse(viewerStorage).time;
+    }
+    clock.tick(100);
+    return compare('e2', expected).then(() => {
+      expect(getStoredTime()).to.equal(100);
+      removeMemoryCacheOfCid();
+      clock.tick(3600);
+      return compare('e2', expected).then(() => {
+        expect(getStoredTime()).to.equal(100);
+        removeMemoryCacheOfCid();
+        clock.tick(DAY);
+        return compare('e2', expected).then(() => {
+          expect(getStoredTime()).to.equal(100 + 3600 + DAY);
+        });
+      });
+    });
+  });
+
+  it('should wait until after pre-rendering', () => {
+    let nonce = 'not visible';
+    whenFirstVisible = timer.promise(100).then(() => {
+      nonce = 'visible';
+    });
+    const p = cid.get('test', hasConsent).then(unusedC => {
+      expect(nonce).to.equal('visible');
+    });
+    clock.tick(100);
+    return p;
   });
 
   it('should wait for consent', () => {
@@ -290,18 +413,38 @@ describe('cid', () => {
       resolve = r;
     });
 
+    let sha384Promise;
+    crypto.sha384Base64 = val => {
+      if (val instanceof Uint8Array) {
+        val = '[' + Array.apply([], val).join(',') + ']';
+      }
+
+      return sha384Promise = Promise.resolve('sha384(' + val + ')');
+    };
+
     return cid.get('e2', hasConsent, persistencePromise).then(c => {
       expect(c).to.equal('sha384(sha384([1,2,3,0,0,0,0,0,0,0,0,0,0,0,0,15])http://www.origin.come2)');
       expect(storage['amp-cid']).to.be.undefined;
       clock.tick(777);
       resolve();
-      return persistencePromise.then(() => {
+      return Promise.all([persistencePromise, sha384Promise]).then(() => {
         expect(storage['amp-cid']).to.be.string;
         const stored = JSON.parse(storage['amp-cid']);
         expect(stored.cid).to.equal(
             'sha384([1,2,3,0,0,0,0,0,0,0,0,0,0,0,0,15])');
         expect(stored.time).to.equal(777);
       });
+    });
+  });
+
+  it('should not wait persistence consent for viewer storage', () => {
+    isIframed = true;
+    const persistencePromise = new Promise(() => {/* never resolves */});
+    return cid.get('e2', hasConsent, persistencePromise).then(() => {
+      expect(viewerStorage).to.equal(JSON.stringify({
+        time: 0,
+        cid: 'sha384([1,2,3,0,0,0,0,0,0,0,0,0,0,0,0,15])',
+      }));
     });
   });
 
@@ -380,6 +523,43 @@ describe('cid', () => {
     return cid.get('cookie_name', hasConsent).then(() => {
       expect(fakeWin.document.cookie).to.equal('cookie_name=12345');
     });
+  });
+
+  it('should return same value for multiple calls on non-proxied urls', () => {
+    fakeWin.location.href = 'https://abc.org/foo/?f=0';
+    fakeWin.location.hostname = 'foo.abc.org';
+    const cid1 = cid.get({scope: 'cookie', createCookieIfNotPresent: true},
+        hasConsent);
+    const cid2 = cid.get({scope: 'cookie', createCookieIfNotPresent: true},
+        hasConsent);
+    return cid1.then(c1 => {
+      return cid2.then(c2 => {
+        expect(c1).to.equal(c2);
+      });
+    });
+  });
+
+  it('should return same value for multiple calls on proxied urls', () => {
+    fakeWin.location.href = 'https://cdn.ampproject.org/v/abc.org/foo/?f=0';
+    fakeWin.location.hostname = 'cdn.ampproject.org';
+    const cid1 = cid.get({scope: 'cookie', createCookieIfNotPresent: true},
+        hasConsent);
+    return cid1.then(c1 => {
+      const cid2 = cid.get({scope: 'cookie', createCookieIfNotPresent: true},
+          hasConsent);
+      return cid2.then(c2 => {
+        expect(c1).to.equal(c2);
+      });
+    });
+  });
+
+  it('should retreive cookie value with . in name', () => {
+    fakeWin.location.href =
+        'https://abc.org/';
+    fakeWin.document.cookie = '_sp_id.44=4567;';
+    return compare(
+        '_sp_id.44',
+        '4567');
   });
 
   function compare(externalCidScope, compareValue) {

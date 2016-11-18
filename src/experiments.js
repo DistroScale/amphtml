@@ -22,7 +22,7 @@
  */
 
 import {getCookie, setCookie} from './cookies';
-import {timer} from './timer';
+import {parseQueryString} from './url';
 
 
 /** @const {string} */
@@ -37,8 +37,16 @@ const COOKIE_EXPIRATION_INTERVAL = COOKIE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
 /** @const {string} */
 const CANARY_EXPERIMENT_ID = 'dev-channel';
 
-/** @const {!Object<string, boolean>} */
-const EXPERIMENT_TOGGLES = Object.create(null);
+/** @type {Object<string, boolean>|undefined} */
+let toggles_;
+
+/**
+ * A wrapper to avoid a static side-effect.
+ * @return {!Object<string, boolean>}
+ */
+function experimentToggles() {
+  return toggles_ || (toggles_ = Object.create(null));
+}
 
 
 /**
@@ -60,7 +68,6 @@ export function isDevChannel(win) {
 /**
  * Whether the version corresponds to the dev-channel binary.
  * @param {!Window} win
- * @param {string} version
  * @return {boolean}
  * @private Visible for testing only!
  */
@@ -76,10 +83,37 @@ export function isDevChannelVersionDoNotUse_(win) {
  * @return {boolean}
  */
 export function isExperimentOn(win, experimentId) {
-  if (experimentId in EXPERIMENT_TOGGLES) {
-    return EXPERIMENT_TOGGLES[experimentId];
+  const toggles = experimentToggles();
+  if (experimentId in toggles) {
+    return toggles[experimentId];
   }
-  return EXPERIMENT_TOGGLES[experimentId] = calcExperimentOn(win, experimentId);
+  return toggles[experimentId] = calcExperimentOn(win, experimentId);
+}
+
+/**
+ * Check whether an experiment is on while allowing viewers to force
+ * the experiment state via a viewer URL param of the form:
+ * `e-$experimentId=1` (on) or `e-$experimentId=0` (off).
+ * NOTE: This should only be used if it is needed and if turning the
+ * experiment on or off does not have security implications.
+ * @param {!Window} win
+ * @param {string} experimentId
+ * @return {boolean}
+ */
+export function isExperimentOnAllowUrlOverride(win, experimentId) {
+  const hash = win.location.originalHash || win.location.hash;
+  if (hash) {
+    // Note: If this is used a lot, this should be optimized to only
+    // parse once per page load.
+    const param = parseQueryString(hash)['e-' + experimentId];
+    if (param == '1') {
+      return true;
+    }
+    if (param == '0') {
+      return false;
+    }
+  }
+  return isExperimentOn(win, experimentId);
 }
 
 /**
@@ -104,24 +138,35 @@ function calcExperimentOn(win, experimentId) {
 
 
 /**
- * Toggles the expriment on or off. Returns the actual value of the expriment
+ * Toggles the experiment on or off. Returns the actual value of the experiment
  * after toggling is done.
  * @param {!Window} win
  * @param {string} experimentId
  * @param {boolean=} opt_on
- * @return {boolean}
+ * @param {boolean=} opt_transientExperiment  Whether to toggle the
+ *     experiment state "transiently" (i.e., for this page load only) or
+ *     durably (by saving the experiment IDs to the cookie after toggling).
+ *     Default: false (save durably).
+ * @return {boolean} New state for experimentId.
  */
-export function toggleExperiment(win, experimentId, opt_on) {
+export function toggleExperiment(win, experimentId, opt_on,
+    opt_transientExperiment) {
+  const toggles = experimentToggles();
   const experimentIds = getExperimentIds(win);
-  const currentlyOn = experimentIds.indexOf(experimentId) != -1;
+  const currentlyOn = (experimentIds.indexOf(experimentId) != -1) ||
+      (experimentId in toggles && toggles[experimentId]);
   const on = opt_on !== undefined ? opt_on : !currentlyOn;
   if (on != currentlyOn) {
     if (on) {
       experimentIds.push(experimentId);
+      toggles[experimentId] = true;
     } else {
       experimentIds.splice(experimentIds.indexOf(experimentId), 1);
+      toggles[experimentId] = false;
     }
-    saveExperimentIds(win, experimentIds);
+    if (!opt_transientExperiment) {
+      saveExperimentIds(win, experimentIds);
+    }
   }
   return on;
 }
@@ -133,8 +178,12 @@ export function toggleExperiment(win, experimentId, opt_on) {
  * @return {!Array<string>}
  */
 function getExperimentIds(win) {
+  if (win._experimentCookie) {
+    return win._experimentCookie;
+  }
   const experimentCookie = getCookie(win, COOKIE_NAME);
-  return experimentCookie ? experimentCookie.split(/\s*,\s*/g) : [];
+  return win._experimentCookie = (
+      experimentCookie ? experimentCookie.split(/\s*,\s*/g) : []);
 }
 
 
@@ -144,8 +193,9 @@ function getExperimentIds(win) {
  * @param {!Array<string>} experimentIds
  */
 function saveExperimentIds(win, experimentIds) {
+  win._experimentCookie = null;
   setCookie(win, COOKIE_NAME, experimentIds.join(','),
-      timer.now() + COOKIE_EXPIRATION_INTERVAL);
+      Date.now() + COOKIE_EXPIRATION_INTERVAL);
 }
 
 /**
@@ -153,7 +203,5 @@ function saveExperimentIds(win, experimentIds) {
  * @visibleForTesting
  */
 export function resetExperimentToggles_() {
-  Object.keys(EXPERIMENT_TOGGLES).forEach(key => {
-    delete EXPERIMENT_TOGGLES[key];
-  });
+  toggles_ = undefined;
 }
